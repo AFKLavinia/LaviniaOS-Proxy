@@ -1,0 +1,33 @@
+# Rust
+target/
+**/*.rs.bk
+# C build outputs
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.exp
+*.pdb
+# Wintun (redistributed binaries)
+wintun.dll
+wintun/
+# UI
+src/ui/node_modules/
+src/ui/dist/
+src/ui/build/
+# Secrets
+.env*
+*.pem
+*.key
+# OS / editor artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+# Temporary artifacts
+*.log.tmp
+tmp/
+scratch/
+*.tmp

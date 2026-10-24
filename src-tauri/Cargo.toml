@@ -1,0 +1,28 @@
+[package]
+name = "lavinia-client"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "lavinia_client"
+
+[[bin]]
+name = "lavinia-client"
+path = "src/main.rs"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "time", "sync", "macros"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[build-dependencies]
+cc = "1"
+tauri-build = "2"
