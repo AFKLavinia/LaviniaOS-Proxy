@@ -1,26 +1,26 @@
 //! Windows routing and firewall / DNS management for Wintun transparent proxying.
-use std::fs::{self, File};
+use std::fs;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 use super::proc::privileged_powershell;
 use crate::platform::{FirewallSpec, PlatformError};
 
-/// Owns the liveness flag file on Windows; removal triggers cleanup in the watchdog.
+/// Owns the liveness flag file on Windows; removal triggers cleanup in the background watchdog.
 pub struct Guard {
     flag: PathBuf,
+    #[allow(dead_code)]
     phone: Ipv4Addr,
 }
 
 impl Guard {
+    /// Signals the privileged watchdog to remove routing and firewall rules.
     pub fn release(&mut self) {
         if let Err(e) = fs::remove_file(&self.flag) {
             if e.kind() != std::io::ErrorKind::NotFound {
                 eprintln!("failed to remove Windows watchdog flag: {e}");
             }
         }
-        // Also perform immediate cleanup
-        let _ = cleanup(&self.phone);
     }
 }
 
@@ -33,12 +33,21 @@ impl Drop for Guard {
 fn flag_path() -> Result<PathBuf, PlatformError> {
     let dir = std::env::temp_dir();
     let path = dir.join(format!("lavinia-{}.run", std::process::id()));
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
     Ok(path)
 }
 
+#[allow(dead_code)]
 fn cleanup(phone: &Ipv4Addr) -> Result<(), PlatformError> {
     let script = format!(
         "Remove-NetRoute -DestinationPrefix '{phone}/32' -Confirm:$false -ErrorAction SilentlyContinue; \
+         Remove-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -ErrorAction SilentlyContinue; \
          Remove-NetFirewallRule -DisplayName 'Lavinia Block Leaks' -ErrorAction SilentlyContinue; \
          Set-NetIPInterface -InterfaceAlias 'Lavinia' -InterfaceMetric 256 -ErrorAction SilentlyContinue"
     );
@@ -47,32 +56,48 @@ fn cleanup(phone: &Ipv4Addr) -> Result<(), PlatformError> {
 
 pub fn apply_firewall(spec: &FirewallSpec) -> Result<Guard, PlatformError> {
     let flag = flag_path()?;
-    File::create(&flag)?;
     let guard = Guard {
         flag: flag.clone(),
         phone: spec.phone,
     };
 
-    let flag_str = flag.to_string_lossy();
+    let flag_str = flag.to_string_lossy().replace('\'', "''");
     let pid = std::process::id();
     let phone = spec.phone;
 
-    // 1. Route phone's IP via existing physical adapter to prevent proxy connection loop
-    // 2. Set default route metric or configure Wintun interface
-    // 3. Spawn a detached background PowerShell watchdog process that monitors the PID and flag file
+    // 1. Watchdog runs elevated in the background. It exits and cleans up when the flag file
+    //    is removed or the parent process terminates.
+    let watchdog_script = format!(
+        "while (Test-Path -LiteralPath '{flag_str}') {{ \
+            if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}; \
+            Start-Sleep -Seconds 1; \
+        }}; \
+        Remove-NetRoute -DestinationPrefix '{phone}/32' -Confirm:$false -ErrorAction SilentlyContinue; \
+        Remove-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -ErrorAction SilentlyContinue; \
+        Remove-NetFirewallRule -DisplayName 'Lavinia Block Leaks' -ErrorAction SilentlyContinue; \
+        Set-NetIPInterface -InterfaceAlias 'Lavinia' -InterfaceMetric 256 -ErrorAction SilentlyContinue; \
+        Remove-Item -LiteralPath '{flag_str}' -Force -ErrorAction SilentlyContinue"
+    );
+    let watchdog_b64 = super::proc::encode_ps_base64(&watchdog_script);
+
+    // 2. Setup script: finds correct physical uplink towards phone, installs /32 route,
+    //    blocks IPv6 leaks, and starts the detached background watchdog.
     let script = format!(
-        "$uplink = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Sort-Object RouteMetric | Select-Object -First 1; \
-         if ($uplink) {{ \
-             New-NetRoute -DestinationPrefix '{phone}/32' -InterfaceIndex $uplink.InterfaceIndex -NextHop $uplink.NextHop -Metric 1 -ErrorAction SilentlyContinue \
+        "$uplink = Find-NetRoute -RemoteIPAddress '{phone}' -ErrorAction SilentlyContinue | Select-Object -First 1; \
+         if (-not $uplink) {{ \
+             $uplink = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1; \
          }}; \
-         Start-Process powershell.exe -WindowStyle Hidden -ArgumentList '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"& {{ \
-             while (Test-Path ''{flag_str}'') {{ \
-                 if (-not (Get-Process -Id {pid} -ErrorAction SilentlyContinue)) {{ break }}; \
-                 Start-Sleep -Seconds 1 \
-             }}; \
-             Remove-NetRoute -DestinationPrefix ''{phone}/32'' -Confirm:$false -ErrorAction SilentlyContinue; \
-             Remove-Item -Path ''{flag_str}'' -ErrorAction SilentlyContinue \
-         }}\"'"
+         if ($uplink) {{ \
+             Remove-NetRoute -DestinationPrefix '{phone}/32' -Confirm:$false -ErrorAction SilentlyContinue; \
+             if ($uplink.NextHop -and $uplink.NextHop -ne '0.0.0.0') {{ \
+                 New-NetRoute -DestinationPrefix '{phone}/32' -InterfaceIndex $uplink.InterfaceIndex -NextHop $uplink.NextHop -PolicyStore ActiveStore -ErrorAction SilentlyContinue; \
+             }} else {{ \
+                 New-NetRoute -DestinationPrefix '{phone}/32' -InterfaceIndex $uplink.InterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue; \
+             }} \
+         }}; \
+         Remove-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -ErrorAction SilentlyContinue; \
+         New-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -Direction Outbound -Action Block -RemoteAddress '::/0' -ErrorAction SilentlyContinue; \
+         Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand','{watchdog_b64}'"
     );
 
     privileged_powershell(&script)?;

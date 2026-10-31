@@ -44,6 +44,11 @@ pub async fn recv_udp_orig(
     unsupported("IP_RECVORIGDSTADDR")
 }
 
+/// Windows does not support IP_TRANSPARENT spoofing for transparent UDP relay.
+pub fn udp_capable() -> bool {
+    false
+}
+
 /// Triggers UAC prompt on Windows to verify administrative access.
 pub fn grant_net_admin() -> Result<(), PlatformError> {
     proc::privileged_powershell("Write-Output 'Administrator privileges granted'")

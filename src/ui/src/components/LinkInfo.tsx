@@ -66,7 +66,7 @@ export function LinkInfo({ status, target, t, onFixUdp }: Props) {
         <span className={`link-icon kind-${link.kind}`}><KindIcon kind={link.kind} /></span>
         <div className="link-main">
           <strong id="link-kind">{getKindLabel(link.kind)}</strong>
-          <span className="link-sub" id="link-name">{link.hardware ?? (link.name || t.unnamedConn)}</span>
+          <span className="link-sub" id="link-name">{link.hardware?.trim() || link.name?.trim() || t.unnamedConn}</span>
         </div>
         {chip && <span className={chip.cls} id="udp-mode">{chip.text}</span>}
       </div>

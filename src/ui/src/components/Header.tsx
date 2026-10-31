@@ -20,7 +20,12 @@ export function Header({ phase, t, onOpenSettings }: Props) {
         </div>
       </div>
       <div className="header-actions">
-        <span className={on ? "pill pill-on" : degraded ? "pill pill-warn" : "pill"} id="status-pill">
+        <span
+          className={on ? "pill pill-on" : degraded ? "pill pill-warn" : "pill"}
+          id="status-pill"
+          role="status"
+          aria-live="polite"
+        >
           <i className="dot" />
           {on ? t.statusActive : degraded ? t.statusDegraded : t.statusIdle}
         </span>

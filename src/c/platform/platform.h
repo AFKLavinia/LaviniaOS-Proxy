@@ -6,6 +6,10 @@
 
 #include "../ring_buffer.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 struct lv_tun {
     lv_ring_t ring;
     void *plat;                      /* platform-private state */
@@ -16,5 +20,9 @@ struct lv_tun {
 int32_t lv_platform_open(struct lv_tun *tun, const char *name); /* starts RX pump */
 int32_t lv_platform_write(struct lv_tun *tun, const uint8_t *pkt, size_t len);
 void lv_platform_close(struct lv_tun *tun);                     /* stops pump, frees plat */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define LV_TUN_MAX_PACKET 2048u
-#define LV_TUN_NAME_MAX 15u
+#define LV_TUN_NAME_MAX 63u
 
 typedef enum lv_status {
     LV_OK = 0,
@@ -19,13 +19,14 @@ typedef enum lv_status {
     LV_ERR_NOMEM = -4,
     LV_ERR_IO = -5,
     LV_ERR_TOO_BIG = -6,    /* packet exceeds LV_TUN_MAX_PACKET or caller buffer */
-    LV_ERR_DRIVER = -7      /* wintun.dll missing or incompatible */
+    LV_ERR_DRIVER = -7,     /* wintun.dll missing or incompatible */
+    LV_ERR_BUFFER_TOO_SMALL = -8 /* destination buffer capacity too small */
 } lv_status_t;
 
 typedef struct lv_tun lv_tun_t;
 
 /* name: NUL-terminated adapter name (<= LV_TUN_NAME_MAX chars).
- * ring_slots: power of two, >= 2. Opaque handle returned via out. */
+ * ring_slots: power of two, 2 <= ring_slots <= 65536. Opaque handle returned via out. */
 int32_t lv_tun_open(const char *name, uint32_t ring_slots, lv_tun_t **out);
 
 /* Non-blocking pop of one raw L3 IP packet from RX ring.
@@ -35,7 +36,7 @@ int32_t lv_tun_read(lv_tun_t *tun, uint8_t *buf, size_t cap);
 /* Injects one raw L3 IP packet into the interface. Returns LV_OK or error. */
 int32_t lv_tun_write(lv_tun_t *tun, const uint8_t *pkt, size_t len);
 
-/* Number of packets dropped because the RX ring was full. */
+/* Number of packets dropped because the RX ring was full or caller buffer was too small. */
 uint64_t lv_tun_dropped(const lv_tun_t *tun);
 
 /* Copies the OS-assigned interface name into buf (NUL-terminated). */

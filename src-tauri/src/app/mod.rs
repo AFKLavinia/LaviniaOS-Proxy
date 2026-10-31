@@ -3,9 +3,12 @@ mod glyph;
 mod tray;
 mod window;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Manager, RunEvent, WindowEvent};
 
 use crate::tunnel::{self, TunnelState};
+
+pub(crate) static EXITING: AtomicBool = AtomicBool::new(false);
 
 pub fn run() {
     tauri::Builder::default()
@@ -27,11 +30,15 @@ pub fn run() {
             }
             tunnel::spawn_telemetry(app.handle());
             spawn_tray_sync(app.handle());
+            window::spawn_fallback_show(app.handle());
             Ok(())
         })
         // Background app: closing the window hides it; exit only via tray "Quit".
         .on_window_event(|win, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if EXITING.load(Ordering::SeqCst) {
+                    return;
+                }
                 api.prevent_close();
                 if let Err(e) = win.hide() {
                     eprintln!("failed to hide window: {e}");
@@ -56,8 +63,13 @@ fn spawn_tray_sync(app: &tauri::AppHandle) {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let status = state.status();
-            let key = (status.phase, status.link.as_ref().map(|l| l.kind));
-            if last != Some(key) {
+            let key = (
+                status.phase,
+                status.target.host,
+                status.target.port,
+                status.link.as_ref().map(|l| (l.kind, l.name.clone(), l.hardware.clone())),
+            );
+            if last.as_ref() != Some(&key) {
                 tray::refresh(&app, &status);
                 last = Some(key);
             }

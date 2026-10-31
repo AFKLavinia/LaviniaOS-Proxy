@@ -21,8 +21,9 @@ pub fn set_enabled(enabled: bool) -> Result<(), PlatformError> {
         let exe_str = exe.to_str().ok_or_else(|| {
             PlatformError::Command("executable path contains invalid characters".into())
         })?;
+        let escaped = exe_str.replace('\'', "''");
         let script = format!(
-            "Set-ItemProperty -Path '{REG_KEY}' -Name '{APP_NAME}' -Value '\"{exe_str}\"'"
+            "Set-ItemProperty -Path '{REG_KEY}' -Name '{APP_NAME}' -Value ('\"' + '{escaped}' + '\"')"
         );
         run_powershell(&script)?;
     } else {

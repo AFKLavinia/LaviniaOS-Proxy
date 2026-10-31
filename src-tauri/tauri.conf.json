@@ -18,11 +18,14 @@
         "width": 460,
         "height": 740,
         "resizable": false,
+        "maximizable": false,
         "visible": false,
         "backgroundColor": "#0b0d14"
       }
     ],
-    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost" }
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost https://asset.localhost data:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost"
+    }
   },
   "bundle": {
     "active": true,

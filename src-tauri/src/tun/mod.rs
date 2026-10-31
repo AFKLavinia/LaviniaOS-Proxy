@@ -1,14 +1,16 @@
 //! Safe wrapper over the C TUN driver. Public entry point: [`TunDevice`].
 mod ffi;
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::fmt;
 use std::os::raw::c_char;
 use std::ptr::NonNull;
+use std::sync::Mutex;
 
 pub const MAX_PACKET: usize = 2048;
 pub const DEFAULT_RING_SLOTS: u32 = 4096;
-const NAME_BUF: usize = 16;
+pub const NAME_MAX: usize = 63;
+pub const NAME_BUF: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunError {
@@ -18,7 +20,9 @@ pub enum TunError {
     OutOfMemory,
     Io,
     PacketTooBig,
+    BufferTooSmall,
     Driver,
+    InvalidUtf8,
     Unknown(i32),
 }
 
@@ -46,7 +50,9 @@ impl fmt::Display for TunError {
             Self::OutOfMemory => f.write_str("out of memory"),
             Self::Io => f.write_str("TUN I/O error"),
             Self::PacketTooBig => f.write_str("packet exceeds size limit"),
+            Self::BufferTooSmall => f.write_str("buffer too small"),
             Self::Driver => f.write_str("TUN driver unavailable or incompatible"),
+            Self::InvalidUtf8 => f.write_str("invalid UTF-8 string"),
             Self::Unknown(c) => write!(f, "unknown TUN error code {c}"),
         }
     }
@@ -56,13 +62,20 @@ impl std::error::Error for TunError {}
 
 pub struct TunDevice {
     raw: NonNull<ffi::LvTun>,
+    write_lock: Mutex<()>,
 }
 
-// The C ring is SPSC: the handle may move between threads, but reads need `&mut self`.
+// The C ring is SPSC: reads require exclusive access (`&mut self`), while writes
+// are protected by `write_lock` (`Mutex<()>`). `TunDevice` is safe to send between
+// threads and share across threads for full-duplex operation.
 unsafe impl Send for TunDevice {}
+unsafe impl Sync for TunDevice {}
 
 impl TunDevice {
     pub fn open(name: &str, ring_slots: u32) -> Result<Self, TunError> {
+        if name.len() > NAME_MAX {
+            return Err(TunError::InvalidArgument);
+        }
         let cname = CString::new(name).map_err(|_| TunError::InvalidArgument)?;
         let mut out: *mut ffi::LvTun = std::ptr::null_mut();
         // SAFETY: `cname` is NUL-terminated and `out` is a valid out-pointer.
@@ -70,7 +83,12 @@ impl TunDevice {
         if rc != ffi::LV_OK {
             return Err(TunError::from_code(rc));
         }
-        NonNull::new(out).map(|raw| Self { raw }).ok_or(TunError::Open)
+        NonNull::new(out)
+            .map(|raw| Self {
+                raw,
+                write_lock: Mutex::new(()),
+            })
+            .ok_or(TunError::Open)
     }
 
     /// Non-blocking read of one raw IP packet; `Ok(None)` when no packet is queued.
@@ -80,11 +98,13 @@ impl TunDevice {
         match rc {
             0 => Ok(None),
             n if n > 0 => Ok(Some(n as usize)),
+            ffi::LV_ERR_TOO_BIG => Err(TunError::BufferTooSmall),
             e => Err(TunError::from_code(e)),
         }
     }
 
     pub fn write_packet(&self, pkt: &[u8]) -> Result<(), TunError> {
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         // SAFETY: handle is live; pkt describes a valid readable slice.
         let rc = unsafe { ffi::lv_tun_write(self.raw.as_ptr(), pkt.as_ptr(), pkt.len()) };
         if rc == ffi::LV_OK {
@@ -100,15 +120,20 @@ impl TunDevice {
     }
 
     pub fn name(&self) -> Result<String, TunError> {
-        let mut buf = [0 as c_char; NAME_BUF];
-        // SAFETY: buf is writable for NAME_BUF bytes; C side NUL-terminates.
-        let rc = unsafe { ffi::lv_tun_name(self.raw.as_ptr(), buf.as_mut_ptr(), NAME_BUF) };
+        let mut buf = [0u8; NAME_BUF];
+        // SAFETY: buf is writable for NAME_BUF (64) bytes; C side writes at most NAME_BUF bytes.
+        let rc = unsafe {
+            ffi::lv_tun_name(self.raw.as_ptr(), buf.as_mut_ptr() as *mut c_char, buf.len())
+        };
         if rc != ffi::LV_OK {
+            if rc == ffi::LV_ERR_TOO_BIG {
+                return Err(TunError::BufferTooSmall);
+            }
             return Err(TunError::from_code(rc));
         }
-        // SAFETY: NUL-terminated by C on success.
-        let s = unsafe { CStr::from_ptr(buf.as_ptr()) };
-        Ok(s.to_string_lossy().into_owned())
+        let nul_pos = buf.iter().position(|&b| b == 0).ok_or(TunError::BufferTooSmall)?;
+        let s = std::str::from_utf8(&buf[..nul_pos]).map_err(|_| TunError::InvalidUtf8)?;
+        Ok(s.to_owned())
     }
 }
 

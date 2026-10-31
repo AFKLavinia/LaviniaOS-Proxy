@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Translations } from "../lib/i18n";
 
 interface Props {
@@ -6,23 +6,49 @@ interface Props {
   port: string;
   t: Translations;
   onConfirm: (user: string, pass: string) => void;
-  onDismiss: () => void;
+  onDismiss?: () => void;
+  onCancel?: () => void;
 }
 
-export function AuthModal({ host, port, t, onConfirm, onDismiss }: Props) {
+export function AuthModal({ host, port, t, onConfirm, onDismiss, onCancel }: Props) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
 
+  const handleDismiss = () => {
+    if (onCancel) onCancel();
+    else if (onDismiss) onDismiss();
+  };
+
+  useEffect(() => {
+    const prevActive = document.activeElement as HTMLElement | null;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        handleDismiss();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      prevActive?.focus?.();
+    };
+  }, [onCancel, onDismiss]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (username.trim() && password.trim()) {
-      onConfirm(username.trim(), password.trim());
+    if (username.trim() && password.length > 0) {
+      onConfirm(username.trim(), password);
     }
   };
 
   return (
-    <div className="modal-backdrop" role="presentation">
-      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div className="modal-backdrop" role="presentation" onClick={handleDismiss}>
+      <div
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="auth-title"
+        onClick={(e) => e.stopPropagation()}
+      >
         <h2 id="auth-title">{t.authTitle}</h2>
         <p>
           <code>{host}:{port}</code> {t.authDesc}
@@ -52,7 +78,7 @@ export function AuthModal({ host, port, t, onConfirm, onDismiss }: Props) {
             />
           </label>
           <div className="modal-actions">
-            <button type="button" className="btn ghost" onClick={onDismiss}>
+            <button type="button" className="btn ghost" onClick={handleDismiss}>
               {t.authCancel}
             </button>
             <button type="submit" className="btn primary">

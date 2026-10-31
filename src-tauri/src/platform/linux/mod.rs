@@ -37,6 +37,14 @@ pub fn original_dst(stream: &tokio::net::TcpStream) -> io::Result<SocketAddrV4> 
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
+    if (len as usize) < mem::size_of::<libc::sockaddr_in>()
+        || addr.sin_family != libc::AF_INET as libc::sa_family_t
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid original_dst address or family",
+        ));
+    }
     Ok(SocketAddrV4::new(
         Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr)),
         u16::from_be(addr.sin_port),
@@ -82,13 +90,11 @@ fn bound_udp(addr: SocketAddrV4, spoof: bool) -> io::Result<std::net::UdpSocket>
     // SAFETY: `raw` is a fresh, valid fd exclusively owned here.
     let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
     let fd = owned.as_raw_fd();
+    set_opt(fd, libc::SOL_IP, IP_TRANSPARENT)?;
     if spoof {
-        set_opt(fd, libc::SOL_IP, IP_TRANSPARENT)?;
         set_opt(fd, libc::SOL_SOCKET, libc::SO_REUSEADDR)?;
         set_opt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT)?;
     } else {
-        // Best effort: wildcard TPROXY listeners work without it; replies need it.
-        let _ = set_opt(fd, libc::SOL_IP, IP_TRANSPARENT);
         set_opt(fd, libc::SOL_IP, IP_RECVORIGDSTADDR)?;
     }
     let sa = sockaddr(addr);
@@ -137,14 +143,34 @@ fn recv_once(fd: libc::c_int, buf: &mut [u8]) -> io::Result<(usize, SocketAddrV4
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
+    if (msg.msg_flags & libc::MSG_CTRUNC) != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "cmsg truncated"));
+    }
+    if (msg.msg_namelen as usize) < mem::size_of::<libc::sockaddr_in>()
+        || src.sin_family != libc::AF_INET as libc::sa_family_t
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid source address family or length",
+        ));
+    }
     let mut dst = None;
     // SAFETY: CMSG_* walk only the control buffer the kernel just filled in `msg`.
     unsafe {
         let mut c = libc::CMSG_FIRSTHDR(&msg);
+        let min_cmsg_len = libc::CMSG_LEN(mem::size_of::<libc::sockaddr_in>() as u32) as usize;
         while !c.is_null() {
-            if (*c).cmsg_level == libc::SOL_IP && (*c).cmsg_type == IP_RECVORIGDSTADDR {
+            if (*c).cmsg_level == libc::SOL_IP
+                && (*c).cmsg_type == IP_RECVORIGDSTADDR
+                && ((*c).cmsg_len as usize) >= min_cmsg_len
+            {
                 let a = std::ptr::read_unaligned(libc::CMSG_DATA(c) as *const libc::sockaddr_in);
-                dst = Some(SocketAddrV4::new(Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)), u16::from_be(a.sin_port)));
+                if a.sin_family == libc::AF_INET as libc::sa_family_t {
+                    dst = Some(SocketAddrV4::new(
+                        Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)),
+                        u16::from_be(a.sin_port),
+                    ));
+                }
             }
             c = libc::CMSG_NXTHDR(&msg, c);
         }
@@ -157,9 +183,12 @@ fn recv_once(fd: libc::c_int, buf: &mut [u8]) -> io::Result<(usize, SocketAddrV4
 /// Grants CAP_NET_ADMIN to the running executable through polkit (credentials are asked by the system prompt).
 pub fn grant_net_admin() -> Result<(), PlatformError> {
     let exe = std::env::current_exe()?;
-    let path = exe.to_str().filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c)));
-    let Some(path) = path else {
+    let path = exe.to_str().ok_or_else(|| {
+        PlatformError::Command("executable path is not valid UTF-8".into())
+    })?;
+    if path.contains(['\0', '\n']) {
         return Err(PlatformError::Command("executable path contains unsafe characters".into()));
-    };
-    proc::privileged_sh(&format!("setcap cap_net_admin+ep '{path}'"))
+    }
+    let escaped = path.replace('\'', "'\\''");
+    proc::privileged_sh(&format!("setcap cap_net_admin+ep '{escaped}'"))
 }

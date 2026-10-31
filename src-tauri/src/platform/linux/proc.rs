@@ -29,13 +29,18 @@ pub fn privileged_sh(script: &str) -> Result<(), PlatformError> {
     if out.status.success() {
         return Ok(());
     }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let trimmed = stderr.trim();
     match out.status.code() {
         Some(PKEXEC_DISMISSED) | Some(PKEXEC_DENIED) if !is_root() => {
-            Err(PlatformError::Command("authorization was cancelled or denied".into()))
+            if trimmed.contains("not found") || trimmed.contains("No such file") {
+                Err(PlatformError::Command(format!("firewall setup failed: {trimmed}")))
+            } else {
+                Err(PlatformError::Command("authorization was cancelled or denied".into()))
+            }
         }
         _ => Err(PlatformError::Command(format!(
-            "firewall setup failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "firewall setup failed: {trimmed}"
         ))),
     }
 }

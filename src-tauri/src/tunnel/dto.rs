@@ -46,7 +46,7 @@ impl TryFrom<TargetDto> for StartOptions {
             Some(s) => {
                 let ip: Ipv4Addr =
                     s.parse().map_err(|_| TunnelError::Validation("DNS server must be an IPv4 address"))?;
-                if ip.is_unspecified() || ip.is_multicast() || ip.is_loopback() {
+                if ip.is_unspecified() || ip.is_multicast() || ip.is_loopback() || ip.is_broadcast() {
                     return Err(TunnelError::Validation("DNS server address is not usable"));
                 }
                 ip
@@ -58,7 +58,7 @@ impl TryFrom<TargetDto> for StartOptions {
 }
 
 /// Validated domain model.
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Target {
     pub host: IpAddr,
     pub port: u16,
@@ -82,8 +82,18 @@ impl TryFrom<TargetDto> for Target {
             .trim()
             .parse()
             .map_err(|_| TunnelError::Validation("host must be a valid IP address"))?;
-        if host.is_unspecified() || host.is_multicast() {
+        if host.is_unspecified() || host.is_multicast() || host.is_loopback() {
             return Err(TunnelError::Validation("host address is not routable"));
+        }
+        match host {
+            IpAddr::V4(v4) => {
+                if v4.is_broadcast() {
+                    return Err(TunnelError::Validation("host address is not routable"));
+                }
+            }
+            IpAddr::V6(_) => {
+                return Err(TunnelError::Validation("only IPv4 proxy addresses are supported"));
+            }
         }
         if dto.port == 0 {
             return Err(TunnelError::Validation("port must be between 1 and 65535"));
@@ -92,7 +102,7 @@ impl TryFrom<TargetDto> for Target {
     }
 }
 
-#[derive(Clone, Copy, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
     Stopped,
@@ -101,7 +111,7 @@ pub enum Phase {
     Degraded,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub phase: Phase,
@@ -111,7 +121,27 @@ pub struct Status {
     pub udp: Option<UdpMode>,
 }
 
-#[derive(Clone, Copy, Serialize)]
+impl PartialEq for Status {
+    fn eq(&self, other: &Self) -> bool {
+        self.phase == other.phase
+            && self.target == other.target
+            && self.udp == other.udp
+            && match (&self.link, &other.link) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.device == b.device
+                        && a.kind == b.kind
+                        && a.name == b.name
+                        && a.hardware == b.hardware
+                }
+                _ => false,
+            }
+    }
+}
+
+impl Eq for Status {}
+
+#[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Telemetry {
     pub phase: Phase,

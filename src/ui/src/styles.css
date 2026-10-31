@@ -21,6 +21,7 @@
   --card: rgba(30, 36, 70, 0.28);
   --card-hover: rgba(45, 54, 102, 0.35);
   --border: rgba(124, 92, 255, 0.16);
+  --border-focus: rgba(99, 102, 241, 0.45);
   --violet: #6366f1;
   --cyan: #38bdf8;
   --glow-1: rgba(99, 102, 241, 0.3);
@@ -35,6 +36,11 @@
   --border-focus: #7c5cff;
   --glow-1: rgba(124, 92, 255, 0.12);
   --glow-2: rgba(76, 201, 240, 0.08);
+}
+
+[data-theme="oled"] .modal {
+  background: #08080c;
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 * {
@@ -289,6 +295,10 @@ html, body {
   opacity: 1;
 }
 
+.error, .modal code, .link-grid dd {
+  user-select: text;
+}
+
 /* Card */
 .card {
   background: var(--card);
@@ -402,6 +412,9 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  border: none;
+  font-family: inherit;
+  color: inherit;
   padding: 3px 8px;
   font-size: 11px;
   border-radius: 6px;
@@ -832,6 +845,51 @@ html, body {
   flex-direction: column;
   gap: 12px;
   margin-top: 12px;
+}
+
+/* Focus Visible Ring */
+button:focus-visible {
+  outline: 2px solid var(--violet);
+  outline-offset: 2px;
+}
+
+/* Autostart Toggle Switch */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.toggle-switch {
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--border);
+  position: relative;
+  cursor: pointer;
+  padding: 2px;
+  transition: all 0.25s ease;
+}
+
+.toggle-switch.active {
+  background: var(--violet);
+  border-color: var(--violet);
+}
+
+.toggle-slider {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #ffffff;
+  transition: transform 0.25s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.toggle-switch.active .toggle-slider {
+  transform: translateX(20px);
 }
 
 /* Buttons */

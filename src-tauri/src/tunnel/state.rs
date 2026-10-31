@@ -2,10 +2,8 @@ use std::net::IpAddr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::dto::{Phase, StartOptions, Status, TunnelError};
-use super::dto::Target;
-use crate::engine::{Counters, Engine};
-use crate::engine::UdpMode;
+use super::dto::{Phase, StartOptions, Status, Target, TunnelError};
+use crate::engine::{Counters, Engine, UdpMode};
 use crate::platform::Uplink;
 
 struct Inner {
@@ -13,12 +11,14 @@ struct Inner {
     target: Target,
     engine: Option<Engine>,
     link: Option<(Uplink, UdpMode)>,
+    cancel_start: bool,
 }
 
 #[derive(Clone)]
 pub struct TunnelState {
     inner: Arc<Mutex<Inner>>,
     pub counters: Arc<Counters>,
+    teardown: Arc<Mutex<()>>,
 }
 
 impl TunnelState {
@@ -29,8 +29,10 @@ impl TunnelState {
                 target: Target::default_phone(),
                 engine: None,
                 link: None,
+                cancel_start: false,
             })),
             counters: Arc::new(Counters::default()),
+            teardown: Arc::new(Mutex::new(())),
         }
     }
 
@@ -70,25 +72,72 @@ impl TunnelState {
         let IpAddr::V4(phone) = target.host else {
             return Err(TunnelError::Validation("only IPv4 proxy addresses are supported"));
         };
+
+        // Serialize starts and wait for any ongoing engine teardown to complete.
+        let _teardown = self.teardown.lock().unwrap_or_else(|p| p.into_inner());
+
         {
             let mut g = self.lock();
             if g.phase != Phase::Stopped {
                 return Err(TunnelError::Conflict("tunnel is already running"));
             }
             g.phase = Phase::Starting;
+            g.cancel_start = false;
             g.target = target;
         }
-        let started = Engine::start(phone, target.port, auth, resolver, self.counters.clone());
-        let mut g = self.lock();
+
+        // Reset live counters for the new session
+        self.counters.rx_bytes.store(0, Ordering::Relaxed);
+        self.counters.tx_bytes.store(0, Ordering::Relaxed);
+        self.counters.rx_packets.store(0, Ordering::Relaxed);
+        self.counters.tx_packets.store(0, Ordering::Relaxed);
+        self.counters.dropped.store(0, Ordering::Relaxed);
+        self.counters.link_up.store(false, Ordering::Relaxed);
+
+        // Catch panics during Engine::start so phase does not get stuck in Starting
+        let started = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Engine::start(phone, target.port, auth, resolver, self.counters.clone())
+        })) {
+            Ok(res) => res,
+            Err(payload) => {
+                let mut g = self.lock();
+                g.phase = Phase::Stopped;
+                g.cancel_start = false;
+                std::panic::resume_unwind(payload);
+            }
+        };
+
         match started {
             Ok(engine) => {
-                g.link = Some((engine.uplink().clone(), engine.udp_mode()));
-                g.engine = Some(engine);
-                g.phase = Phase::Running;
+                let cancelled = {
+                    let mut g = self.lock();
+                    if g.cancel_start || g.phase != Phase::Starting {
+                        g.phase = Phase::Stopped;
+                        g.cancel_start = false;
+                        true
+                    } else {
+                        g.link = Some((engine.uplink().clone(), engine.udp_mode()));
+                        g.engine = Some(engine);
+                        g.phase = Phase::Running;
+                        false
+                    }
+                };
+
+                if cancelled {
+                    // Start was cancelled or stop was requested while Engine::start was running.
+                    // Shut down the orphan engine immediately outside the state lock.
+                    engine.stop();
+                    let g = self.lock();
+                    return Ok(Self::snapshot(&g, Phase::Stopped));
+                }
+
+                let g = self.lock();
                 Ok(Self::snapshot(&g, g.phase))
             }
             Err(e) => {
+                let mut g = self.lock();
                 g.phase = Phase::Stopped;
+                g.cancel_start = false;
                 Err(TunnelError::from(e))
             }
         }
@@ -99,6 +148,8 @@ impl TunnelState {
         let engine = {
             let mut g = self.lock();
             if g.phase == Phase::Starting {
+                g.cancel_start = true;
+                g.phase = Phase::Stopped;
                 return Self::snapshot(&g, g.phase);
             }
             g.phase = Phase::Stopped;
@@ -106,6 +157,7 @@ impl TunnelState {
             g.engine.take()
         };
         if let Some(engine) = engine {
+            let _teardown = self.teardown.lock().unwrap_or_else(|p| p.into_inner());
             engine.stop();
         }
         self.status()

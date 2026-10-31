@@ -44,6 +44,8 @@ export const ipc = {
   startTunnel: (target: Target): Promise<Status> => invoke<Status>("start_tunnel", { target }),
   grantUdpPrivilege: (): Promise<void> => invoke<void>("grant_udp_privilege"),
   stopTunnel: (): Promise<Status> => invoke<Status>("stop_tunnel"),
+  getAutostart: (): Promise<boolean> => invoke<boolean>("get_autostart"),
+  setAutostart: (enabled: boolean): Promise<boolean> => invoke<boolean>("set_autostart", { enabled }),
   onTelemetry: (cb: (t: Telemetry) => void): Promise<UnlistenFn> =>
     listen<Telemetry>("telemetry", (e) => cb(e.payload)),
 };

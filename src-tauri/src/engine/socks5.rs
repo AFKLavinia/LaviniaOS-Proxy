@@ -56,7 +56,7 @@ fn proto(msg: &'static str) -> io::Error {
 /// Method selection plus (when negotiated) username/password sub-negotiation.
 async fn negotiate(s: &mut TcpStream, up: &Upstream) -> io::Result<()> {
     match &up.auth {
-        Some(_) => s.write_all(&[VER, 2, METHOD_NO_AUTH, METHOD_USERPASS]).await?,
+        Some(_) => s.write_all(&[VER, 1, METHOD_USERPASS]).await?,
         None => s.write_all(&[VER, 1, METHOD_NO_AUTH]).await?,
     }
     let mut reply = [0u8; 2];
@@ -65,7 +65,8 @@ async fn negotiate(s: &mut TcpStream, up: &Upstream) -> io::Result<()> {
         return Err(proto("invalid socks5 reply version"));
     }
     match (reply[1], &up.auth) {
-        (METHOD_NO_AUTH, _) => Ok(()),
+        (METHOD_NO_AUTH, None) => Ok(()),
+        (METHOD_NO_AUTH, Some(_)) => Err(proto("socks5 server downgraded authentication")),
         (METHOD_USERPASS, Some(auth)) => {
             let mut msg = Vec::with_capacity(3 + auth.user.len() + auth.pass.len());
             msg.push(AUTH_VER);
@@ -76,6 +77,9 @@ async fn negotiate(s: &mut TcpStream, up: &Upstream) -> io::Result<()> {
             s.write_all(&msg).await?;
             let mut status = [0u8; 2];
             s.read_exact(&mut status).await?;
+            if status[0] != AUTH_VER {
+                return Err(proto("invalid socks5 auth reply version"));
+            }
             if status[1] != 0 {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "socks5 authentication failed"));
             }
@@ -142,6 +146,9 @@ async fn read_reply(s: &mut TcpStream, failure: &'static str) -> io::Result<(IpA
     if head[1] != REP_OK {
         return Err(io::Error::new(io::ErrorKind::ConnectionRefused, format!("{failure} (code {})", head[1])));
     }
+    if head[2] != 0 {
+        return Err(proto("invalid socks5 reserved byte"));
+    }
     let ip = match head[3] {
         ATYP_V4 => {
             let mut o = [0u8; 4];
@@ -156,10 +163,20 @@ async fn read_reply(s: &mut TcpStream, failure: &'static str) -> io::Result<(IpA
         ATYP_DOMAIN => {
             let mut l = [0u8; 1];
             s.read_exact(&mut l).await?;
+            let len = usize::from(l[0]);
             let mut name = [0u8; 255];
-            s.read_exact(&mut name[..usize::from(l[0])]).await?;
-            // Hostname-bound replies carry no usable IP; callers fall back to the proxy host.
-            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            s.read_exact(&mut name[..len]).await?;
+            if let Ok(domain_str) = std::str::from_utf8(&name[..len]) {
+                if let Ok(ip) = domain_str.parse::<IpAddr>() {
+                    ip
+                } else if let Ok(mut addrs) = tokio::net::lookup_host((domain_str, 0)).await {
+                    addrs.next().map(|sa| sa.ip()).unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+                } else {
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+                }
+            } else {
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+            }
         }
         _ => return Err(proto("unknown socks5 address type")),
     };
@@ -181,6 +198,9 @@ async fn associate(proxy: &Upstream) -> io::Result<(TcpStream, SocketAddr)> {
     // Zero address/port: our outgoing UDP source is not known in advance.
     s.write_all(&[VER, CMD_UDP_ASSOCIATE, 0, ATYP_V4, 0, 0, 0, 0, 0, 0]).await?;
     let (ip, port) = read_reply(&mut s, "socks5 udp associate failed").await?;
+    if port == 0 {
+        return Err(proto("socks5 udp associate returned port 0"));
+    }
     // Servers commonly answer 0.0.0.0: the relay then lives on the proxy host itself.
     let ip = if ip.is_unspecified() { proxy.addr.ip() } else { ip };
     Ok((s, SocketAddr::new(ip, port)))
@@ -188,7 +208,7 @@ async fn associate(proxy: &Upstream) -> io::Result<(TcpStream, SocketAddr)> {
 
 /// Checks that the upstream grants UDP associations.
 pub async fn probe_udp(proxy: &Upstream) -> io::Result<()> {
-    udp_associate(proxy).await.map(|_| ())
+    with_timeout(PROBE_TIMEOUT, "socks5 udp probe timed out", associate(proxy)).await.map(|_| ())
 }
 
 /// Frames a payload for the SOCKS5 UDP relay (no fragmentation).
@@ -300,5 +320,92 @@ mod tests {
         let none = Upstream::new(addr, None);
         let e = connect(&none, "1.2.3.4:80".parse().unwrap()).await.unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn auth_downgrade_is_rejected() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut hello = [0u8; 2];
+            s.read_exact(&mut hello).await.unwrap();
+            let mut methods = vec![0u8; usize::from(hello[1])];
+            s.read_exact(&mut methods).await.unwrap();
+            // Rogue server tries to force METHOD_NO_AUTH when client offered USERPASS
+            s.write_all(&[VER, METHOD_NO_AUTH]).await.unwrap();
+        });
+        let up = Upstream::new(addr, Auth::new("alice", "secret"));
+        let e = connect(&up, "1.2.3.4:80".parse().unwrap()).await.unwrap_err();
+        assert_eq!(e.to_string(), "socks5 server downgraded authentication");
+    }
+
+    #[tokio::test]
+    async fn auth_reply_invalid_version_is_rejected() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut hello = [0u8; 2];
+            s.read_exact(&mut hello).await.unwrap();
+            let mut methods = vec![0u8; usize::from(hello[1])];
+            s.read_exact(&mut methods).await.unwrap();
+            s.write_all(&[VER, METHOD_USERPASS]).await.unwrap();
+            let mut h = [0u8; 2];
+            s.read_exact(&mut h).await.unwrap();
+            let mut user = vec![0u8; usize::from(h[1])];
+            s.read_exact(&mut user).await.unwrap();
+            let mut pl = [0u8; 1];
+            s.read_exact(&mut pl).await.unwrap();
+            let mut pass = vec![0u8; usize::from(pl[0])];
+            s.read_exact(&mut pass).await.unwrap();
+            // Invalid auth version 99
+            s.write_all(&[99, 0]).await.unwrap();
+        });
+        let up = Upstream::new(addr, Auth::new("alice", "secret"));
+        let e = connect(&up, "1.2.3.4:80".parse().unwrap()).await.unwrap_err();
+        assert_eq!(e.to_string(), "invalid socks5 auth reply version");
+    }
+
+    #[tokio::test]
+    async fn rsv_byte_non_zero_is_rejected() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut hello = [0u8; 2];
+            s.read_exact(&mut hello).await.unwrap();
+            let mut methods = vec![0u8; usize::from(hello[1])];
+            s.read_exact(&mut methods).await.unwrap();
+            s.write_all(&[VER, METHOD_NO_AUTH]).await.unwrap();
+            let mut req = [0u8; 10];
+            s.read_exact(&mut req).await.unwrap();
+            // Reply with RSV = 1 (invalid)
+            s.write_all(&[VER, 0, 1, ATYP_V4, 127, 0, 0, 1, 4, 210]).await.unwrap();
+        });
+        let up = Upstream::new(addr, None);
+        let e = connect(&up, "1.2.3.4:80".parse().unwrap()).await.unwrap_err();
+        assert_eq!(e.to_string(), "invalid socks5 reserved byte");
+    }
+
+    #[tokio::test]
+    async fn udp_associate_port_zero_is_rejected() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = l.accept().await.unwrap();
+            let mut hello = [0u8; 2];
+            s.read_exact(&mut hello).await.unwrap();
+            let mut methods = vec![0u8; usize::from(hello[1])];
+            s.read_exact(&mut methods).await.unwrap();
+            s.write_all(&[VER, METHOD_NO_AUTH]).await.unwrap();
+            let mut req = [0u8; 10];
+            s.read_exact(&mut req).await.unwrap();
+            // Reply with port = 0
+            s.write_all(&[VER, 0, 0, ATYP_V4, 127, 0, 0, 1, 0, 0]).await.unwrap();
+        });
+        let up = Upstream::new(addr, None);
+        let e = udp_associate(&up).await.unwrap_err();
+        assert_eq!(e.to_string(), "socks5 udp associate returned port 0");
     }
 }

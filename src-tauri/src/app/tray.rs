@@ -1,10 +1,12 @@
+use std::sync::atomic::Ordering;
+
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
-use super::{glyph, window};
+use super::{glyph, window, EXITING};
 use crate::platform::LinkKind;
-use crate::tunnel::{Phase, Status};
+use crate::tunnel::{Phase, Status, TunnelState};
 
 const ID_SHOW: &str = "show";
 const ID_QUIT: &str = "quit";
@@ -21,7 +23,11 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("Lavinia Client")
         .on_menu_event(|app, event| match event.id.as_ref() {
             ID_SHOW => window::show_main(app),
-            ID_QUIT => app.exit(0),
+            ID_QUIT => {
+                app.state::<TunnelState>().stop();
+                EXITING.store(true, Ordering::SeqCst);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -31,7 +37,14 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 ..
             } = event
             {
-                window::show_main(tray.app_handle());
+                let app = tray.app_handle();
+                if let Some(win) = app.get_webview_window(window::MAIN_LABEL) {
+                    if win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false) {
+                        let _ = win.hide();
+                        return;
+                    }
+                }
+                window::show_main(app);
             }
         });
 
@@ -48,7 +61,11 @@ pub fn refresh(app: &AppHandle, status: &Status) {
     let color = match status.phase {
         Phase::Running => glyph::GREEN,
         Phase::Degraded => glyph::AMBER,
-        Phase::Stopped | Phase::Starting => {
+        Phase::Starting => {
+            set(&tray, default_icon(app), "Lavinia Client - starting...");
+            return;
+        }
+        Phase::Stopped => {
             set(&tray, default_icon(app), "Lavinia Client - idle");
             return;
         }

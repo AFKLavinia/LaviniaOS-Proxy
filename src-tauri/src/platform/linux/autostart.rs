@@ -15,7 +15,26 @@ fn entry_path() -> Result<PathBuf, PlatformError> {
 }
 
 pub fn is_enabled() -> bool {
-    entry_path().map(|p| p.exists()).unwrap_or(false)
+    let Ok(path) = entry_path() else {
+        return false;
+    };
+    if !path.exists() {
+        return false;
+    }
+    let Ok(content) = fs::read_to_string(&path) else {
+        return false;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "Hidden=true"
+            || trimmed == "X-GNOME-Autostart-enabled=false"
+            || trimmed.eq_ignore_ascii_case("hidden=true")
+            || trimmed.eq_ignore_ascii_case("x-gnome-autostart-enabled=false")
+        {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn set_enabled(enabled: bool) -> Result<(), PlatformError> {
@@ -26,16 +45,24 @@ pub fn set_enabled(enabled: bool) -> Result<(), PlatformError> {
             _ => Ok(()),
         };
     }
-    let exe = std::env::current_exe()?;
+    let exe = std::env::var_os("APPIMAGE")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .map(Ok)
+        .unwrap_or_else(std::env::current_exe)?;
     let exe = exe.to_str().filter(|s| !s.contains(['\n', '"', '%'])).ok_or_else(|| {
         PlatformError::Command("executable path cannot be used in a desktop entry".into())
     })?;
+    let escaped_exe = exe.replace('\\', "\\\\").replace('$', "\\$");
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
+    if fs::symlink_metadata(&path).is_ok() {
+        let _ = fs::remove_file(&path);
+    }
     fs::write(
         &path,
-        format!("[Desktop Entry]\nType=Application\nName=Lavinia Client\nExec=\"{exe}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"),
+        format!("[Desktop Entry]\nType=Application\nName=Lavinia Client\nExec=\"{escaped_exe}\"\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"),
     )?;
     Ok(())
 }

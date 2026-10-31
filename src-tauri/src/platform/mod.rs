@@ -116,7 +116,14 @@ pub async fn recv_udp_orig(
 
 /// True when the process may create IP_TRANSPARENT sockets (required to spoof UDP replies).
 pub fn udp_capable() -> bool {
-    imp::udp_spoof_socket(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).is_ok()
+    #[cfg(target_os = "linux")]
+    {
+        imp::udp_spoof_socket(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)).is_ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        imp::udp_capable()
+    }
 }
 
 /// Elevates the running binary so UDP relaying works (Linux: file capability via polkit).

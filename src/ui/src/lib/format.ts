@@ -1,6 +1,10 @@
 const UNITS = ["B/s", "KB/s", "MB/s", "GB/s"];
+const COUNT_FMT = new Intl.NumberFormat("en-US");
 
 export function formatRate(bytesPerSec: number): string {
+  if (!Number.isFinite(bytesPerSec) || bytesPerSec < 0) {
+    return "0 B/s";
+  }
   let v = bytesPerSec;
   let i = 0;
   while (v >= 1024 && i < UNITS.length - 1) {
@@ -11,5 +15,8 @@ export function formatRate(bytesPerSec: number): string {
 }
 
 export function formatCount(n: number): string {
-  return new Intl.NumberFormat("en-US").format(n);
+  if (!Number.isFinite(n)) {
+    return "0";
+  }
+  return COUNT_FMT.format(n);
 }

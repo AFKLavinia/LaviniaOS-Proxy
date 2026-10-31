@@ -15,6 +15,8 @@
 
 #define TUN_DEV_PATH "/dev/net/tun"
 #define PUMP_POLL_TIMEOUT_MS 100
+#define LV_LINUX_MAX_PACKET 65536u
+#define LV_WRITE_MAX_RETRIES 5
 
 struct linux_plat {
     int fd;
@@ -26,6 +28,7 @@ static void *pump_main(void *arg) {
     struct lv_tun *tun = (struct lv_tun *)arg;
     struct linux_plat *p = (struct linux_plat *)tun->plat;
     struct pollfd pfd = {.fd = p->fd, .events = POLLIN};
+    uint8_t rx_buf[LV_LINUX_MAX_PACKET];
 
     while (atomic_load_explicit(&p->running, memory_order_acquire)) {
         int pr = poll(&pfd, 1, PUMP_POLL_TIMEOUT_MS);
@@ -35,25 +38,29 @@ static void *pump_main(void *arg) {
             }
             break;
         }
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            break;
+        }
         if (pr == 0 || !(pfd.revents & POLLIN)) {
-            if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-                break;
-            }
             continue;
         }
-        lv_slot_t *slot = lv_ring_acquire(&tun->ring);
-        if (slot == NULL) {
-            /* Ring full: drain and discard to apply backpressure by drop. */
-            uint8_t sink[LV_TUN_MAX_PACKET];
-            if (read(p->fd, sink, sizeof(sink)) < 0 && errno != EAGAIN && errno != EINTR) {
-                break;
-            }
-            continue;
-        }
-        ssize_t n = read(p->fd, slot->data, LV_TUN_MAX_PACKET);
+
+        ssize_t n = read(p->fd, rx_buf, sizeof(rx_buf));
         if (n > 0) {
-            lv_ring_commit(&tun->ring, (uint32_t)n);
-        } else if (n < 0 && errno != EAGAIN && errno != EINTR) {
+            if ((size_t)n > LV_TUN_MAX_PACKET) {
+                atomic_fetch_add_explicit(&tun->ring.dropped, 1u, memory_order_relaxed);
+            } else {
+                lv_slot_t *slot = lv_ring_acquire(&tun->ring);
+                if (slot != NULL) {
+                    memcpy(slot->data, rx_buf, (size_t)n);
+                    lv_ring_commit(&tun->ring, (uint32_t)n);
+                }
+                /* If slot == NULL, lv_ring_acquire already incremented dropped */
+            }
+        } else if (n == 0) {
+            /* EOF on tun fd */
+            break;
+        } else if (errno != EAGAIN && errno != EINTR) {
             break;
         }
     }
@@ -61,6 +68,14 @@ static void *pump_main(void *arg) {
 }
 
 int32_t lv_platform_open(struct lv_tun *tun, const char *name) {
+    if (tun == NULL || name == NULL) {
+        return LV_ERR_INVALID_ARG;
+    }
+    size_t name_len = strlen(name);
+    if (name_len == 0 || name_len >= IFNAMSIZ || name_len > LV_TUN_NAME_MAX) {
+        return LV_ERR_INVALID_ARG;
+    }
+
     struct linux_plat *p = (struct linux_plat *)calloc(1, sizeof(*p));
     if (p == NULL) {
         return LV_ERR_NOMEM;
@@ -75,15 +90,29 @@ int32_t lv_platform_open(struct lv_tun *tun, const char *name) {
     struct ifreq ifr;
     memset(&ifr, 0, sizeof(ifr));
     ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-    strncpy(ifr.ifr_name, name, IFNAMSIZ - 1);
+    memcpy(ifr.ifr_name, name, name_len);
+    ifr.ifr_name[name_len] = '\0';
+
     if (ioctl(p->fd, TUNSETIFF, &ifr) < 0) {
         int e = errno;
         close(p->fd);
         free(p);
         return (e == EACCES || e == EPERM) ? LV_ERR_PRIVILEGE : LV_ERR_OPEN;
     }
-    strncpy(tun->name, ifr.ifr_name, LV_TUN_NAME_MAX);
-    tun->name[LV_TUN_NAME_MAX] = '\0';
+
+    size_t assigned_len = strnlen(ifr.ifr_name, IFNAMSIZ);
+    if (assigned_len >= IFNAMSIZ || assigned_len > LV_TUN_NAME_MAX) {
+        close(p->fd);
+        free(p);
+        return LV_ERR_INVALID_ARG;
+    }
+    memcpy(tun->name, ifr.ifr_name, assigned_len);
+    tun->name[assigned_len] = '\0';
+    if (strlen(tun->name) >= IFNAMSIZ) {
+        close(p->fd);
+        free(p);
+        return LV_ERR_INVALID_ARG;
+    }
 
     tun->plat = p;
     atomic_init(&p->running, 1);
@@ -97,8 +126,16 @@ int32_t lv_platform_open(struct lv_tun *tun, const char *name) {
 }
 
 int32_t lv_platform_write(struct lv_tun *tun, const uint8_t *pkt, size_t len) {
+    if (tun == NULL || pkt == NULL || len == 0) {
+        return LV_ERR_INVALID_ARG;
+    }
     struct linux_plat *p = (struct linux_plat *)tun->plat;
-    for (;;) {
+    if (!p || !atomic_load_explicit(&p->running, memory_order_acquire)) {
+        return LV_ERR_IO;
+    }
+
+    int retries = 0;
+    while (atomic_load_explicit(&p->running, memory_order_acquire)) {
         ssize_t n = write(p->fd, pkt, len);
         if (n == (ssize_t)len) {
             return LV_OK;
@@ -106,16 +143,23 @@ int32_t lv_platform_write(struct lv_tun *tun, const uint8_t *pkt, size_t len) {
         if (n < 0 && errno == EINTR) {
             continue;
         }
-        if (n < 0 && errno == EAGAIN) {
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (++retries > LV_WRITE_MAX_RETRIES) {
+                return LV_ERR_IO;
+            }
             struct pollfd pfd = {.fd = p->fd, .events = POLLOUT};
             (void)poll(&pfd, 1, PUMP_POLL_TIMEOUT_MS);
             continue;
         }
         return LV_ERR_IO;
     }
+    return LV_ERR_IO;
 }
 
 void lv_platform_close(struct lv_tun *tun) {
+    if (tun == NULL) {
+        return;
+    }
     struct linux_plat *p = (struct linux_plat *)tun->plat;
     if (p == NULL) {
         return;

@@ -5,31 +5,51 @@
 #include "platform/platform.h"
 
 int32_t lv_tun_open(const char *name, uint32_t ring_slots, lv_tun_t **out) {
-    if (name == NULL || out == NULL || strlen(name) > LV_TUN_NAME_MAX) {
+    if (out == NULL) {
         return LV_ERR_INVALID_ARG;
     }
     *out = NULL;
+
+    if (name == NULL) {
+        return LV_ERR_INVALID_ARG;
+    }
+
+    size_t name_len = 0;
+    while (name_len <= LV_TUN_NAME_MAX && name[name_len] != '\0') {
+        name_len++;
+    }
+    if (name_len == 0 || name_len > LV_TUN_NAME_MAX) {
+        return LV_ERR_INVALID_ARG;
+    }
+
+    if (ring_slots < 2u || ring_slots > 65536u || (ring_slots & (ring_slots - 1u)) != 0u) {
+        return LV_ERR_INVALID_ARG;
+    }
+
     struct lv_tun *tun = (struct lv_tun *)calloc(1, sizeof(*tun));
     if (tun == NULL) {
         return LV_ERR_NOMEM;
     }
+
     int32_t rc = lv_ring_init(&tun->ring, ring_slots);
     if (rc != LV_OK) {
         free(tun);
         return rc;
     }
+
     rc = lv_platform_open(tun, name);
     if (rc != LV_OK) {
         lv_ring_destroy(&tun->ring);
         free(tun);
         return rc;
     }
+
     *out = tun;
     return LV_OK;
 }
 
 int32_t lv_tun_read(lv_tun_t *tun, uint8_t *buf, size_t cap) {
-    if (tun == NULL || buf == NULL) {
+    if (tun == NULL || buf == NULL || cap == 0) {
         return LV_ERR_INVALID_ARG;
     }
     return lv_ring_pop(&tun->ring, buf, cap);
@@ -41,6 +61,9 @@ int32_t lv_tun_write(lv_tun_t *tun, const uint8_t *pkt, size_t len) {
     }
     if (len > LV_TUN_MAX_PACKET) {
         return LV_ERR_TOO_BIG;
+    }
+    if (tun->plat == NULL) {
+        return LV_ERR_IO;
     }
     return lv_platform_write(tun, pkt, len);
 }
@@ -56,11 +79,15 @@ int32_t lv_tun_name(const lv_tun_t *tun, char *buf, size_t cap) {
     if (tun == NULL || buf == NULL || cap == 0) {
         return LV_ERR_INVALID_ARG;
     }
-    size_t n = strlen(tun->name);
-    if (n + 1 > cap) {
+    size_t n = 0;
+    while (n < sizeof(tun->name) && tun->name[n] != '\0') {
+        n++;
+    }
+    if (n + 1u > cap) {
         return LV_ERR_TOO_BIG;
     }
-    memcpy(buf, tun->name, n + 1);
+    memcpy(buf, tun->name, n);
+    buf[n] = '\0';
     return LV_OK;
 }
 
@@ -70,5 +97,6 @@ void lv_tun_close(lv_tun_t *tun) {
     }
     lv_platform_close(tun);
     lv_ring_destroy(&tun->ring);
+    memset(tun, 0, sizeof(*tun));
     free(tun);
 }

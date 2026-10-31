@@ -1,7 +1,7 @@
 //! Transparent UDP relay (voice/video/games): diverted datagram -> SOCKS5 UDP ASSOCIATE -> reply spoofed as original dst.
 use std::collections::HashMap;
 use std::io;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,15 +35,25 @@ pub async fn serve(socket: UdpSocket, proxy: Upstream, counters: Arc<Counters>, 
             Ok(v) => v,
             Err(e) => {
                 eprintln!("udp recv failed: {e}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
         };
-        if dst.ip().is_loopback() {
+        if dst.ip().is_loopback()
+            || dst.ip().is_unspecified()
+            || dst.ip().is_multicast()
+            || dst.ip().is_broadcast()
+            || IpAddr::V4(*dst.ip()) == proxy.addr.ip()
+        {
             continue;
         }
         let key = (client, dst);
         let payload = buf[..n].to_vec();
-        let existing = sessions.lock().ok().and_then(|m| m.get(&key).cloned());
+        let existing = sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&key)
+            .cloned();
         if let Some(tx) = existing {
             if tx.try_send(payload).is_err() {
                 counters.dropped.fetch_add(1, Ordering::Relaxed);
@@ -56,18 +66,21 @@ pub async fn serve(socket: UdpSocket, proxy: Upstream, counters: Arc<Counters>, 
         };
         let (tx, rx) = mpsc::channel(SESSION_QUEUE);
         let _ = tx.try_send(payload);
-        if let Ok(mut m) = sessions.lock() {
-            m.insert(key, tx);
-        }
+        sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(key, tx);
         let (sessions, counters, proxy) = (sessions.clone(), counters.clone(), proxy.clone());
+        let task_stop = stop.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = session(key, &proxy, rx, &counters).await {
+            if let Err(e) = session(key, &proxy, rx, &counters, task_stop).await {
                 eprintln!("udp session ended: {e}");
             }
-            if let Ok(mut m) = sessions.lock() {
-                m.remove(&key);
-            }
+            sessions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&key);
         });
     }
 }
@@ -77,9 +90,15 @@ async fn session(
     proxy: &Upstream,
     mut rx: mpsc::Receiver<Vec<u8>>,
     c: &Counters,
+    mut stop: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let (mut control, relay) = socks5::udp_associate(proxy).await?;
-    let upstream = UdpSocket::bind("0.0.0.0:0").await?;
+    let bind_addr: SocketAddr = if relay.is_ipv6() {
+        ([0u16; 8], 0).into()
+    } else {
+        ([0u8; 4], 0).into()
+    };
+    let upstream = UdpSocket::bind(bind_addr).await?;
     upstream.connect(relay).await?;
     let reply = UdpSocket::from_std(platform::udp_spoof_socket(dst)?)?;
 
@@ -90,6 +109,7 @@ async fn session(
     tokio::pin!(idle);
     loop {
         tokio::select! {
+            _ = stop.changed() => return Ok(()),
             _ = &mut idle => return Ok(()),
             out = rx.recv() => {
                 let Some(payload) = out else { return Ok(()) };
@@ -101,16 +121,23 @@ async fn session(
             inbound = upstream.recv(&mut down) => {
                 let n = inbound?;
                 idle.as_mut().reset(tokio::time::Instant::now() + IDLE_TIMEOUT);
-                if let Some((_, payload)) = socks5::decode_udp(&down[..n]) {
-                    reply.send_to(payload, SocketAddr::V4(client)).await?;
+                if let Some((src, payload)) = socks5::decode_udp(&down[..n]) {
+                    if src == dst {
+                        reply.send_to(payload, SocketAddr::V4(client)).await?;
+                    } else {
+                        let spoof = UdpSocket::from_std(platform::udp_spoof_socket(src)?)?;
+                        spoof.send_to(payload, SocketAddr::V4(client)).await?;
+                    }
                     c.rx_bytes.fetch_add(payload.len() as u64, Ordering::Relaxed);
                     c.rx_packets.fetch_add(1, Ordering::Relaxed);
                 }
             }
             // Control TCP closing terminates the association per RFC 1928.
             closed = control.read(&mut ctl) => {
-                closed?;
-                return Ok(());
+                match closed {
+                    Ok(0) | Err(_) => return Ok(()),
+                    Ok(_) => {}
+                }
             }
         }
     }

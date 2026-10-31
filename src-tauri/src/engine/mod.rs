@@ -27,7 +27,7 @@ use crate::platform::{self, FirewallGuard, FirewallSpec, PlatformError, Uplink};
 
 const WORKER_THREADS: usize = 2;
 /// Time the privileged watchdog needs to notice the released flag and delete the rules.
-const WATCHDOG_GRACE: Duration = Duration::from_millis(1500);
+const WATCHDOG_GRACE: Duration = Duration::from_millis(150);
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
 const PROBE_FAILURES_TO_DOWN: u32 = 2;
 
@@ -39,7 +39,11 @@ async fn monitor(proxy: Upstream, counters: Arc<Counters>, mut stop: watch::Rece
             _ = stop.changed() => break,
             _ = tokio::time::sleep(PROBE_INTERVAL) => {}
         }
-        match socks5::probe(&proxy).await {
+        let probe_result = tokio::select! {
+            _ = stop.changed() => break,
+            r = socks5::probe(&proxy) => r,
+        };
+        match probe_result {
             Ok(()) => {
                 failures = 0;
                 counters.link_up.store(true, Ordering::Relaxed);
@@ -153,9 +157,9 @@ impl Engine {
         runtime.spawn(monitor(proxy.clone(), counters.clone(), stop_rx.clone()));
         runtime.spawn(tcp::serve(tcp_listener, proxy.clone(), counters.clone(), stop_rx.clone()));
         if let Some(sock) = udp_socket {
-            runtime.spawn(udp::serve(sock, proxy.clone(), counters, stop_rx.clone()));
+            runtime.spawn(udp::serve(sock, proxy.clone(), counters.clone(), stop_rx.clone()));
         }
-        runtime.spawn(dns::serve(dns_socket, proxy, resolver, stop_rx));
+        runtime.spawn(dns::serve(dns_socket, proxy, resolver, counters, stop_rx));
 
         let guard = platform::apply_firewall(&spec)?;
         Ok(Self { uplink, udp, runtime: Some(runtime), shutdown: stop_tx, guard: Some(guard) })

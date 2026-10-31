@@ -14,7 +14,12 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
   const [savedList, setSavedList] = useState<string[]>(() => {
     try {
       const stored = localStorage.getItem("lavinia_saved_endpoints");
-      return stored ? JSON.parse(stored) : [];
+      if (!stored) return [];
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+        return parsed;
+      }
+      return [];
     } catch {
       return [];
     }
@@ -28,14 +33,22 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
     if (!savedList.includes(ep)) {
       const updated = [ep, ...savedList].slice(0, 5);
       setSavedList(updated);
-      localStorage.setItem("lavinia_saved_endpoints", JSON.stringify(updated));
+      try {
+        localStorage.setItem("lavinia_saved_endpoints", JSON.stringify(updated));
+      } catch {
+        // ignore storage errors
+      }
     }
   };
 
   const handleSelect = (ep: string) => {
-    const [h, p] = ep.split(":");
-    if (h && p) {
-      onChange({ host: h, port: p });
+    const idx = ep.lastIndexOf(":");
+    if (idx > 0) {
+      const h = ep.slice(0, idx);
+      const p = ep.slice(idx + 1);
+      if (h && p) {
+        onChange({ host: h, port: p });
+      }
     }
   };
 
@@ -43,7 +56,11 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
     e.stopPropagation();
     const updated = savedList.filter((item) => item !== ep);
     setSavedList(updated);
-    localStorage.setItem("lavinia_saved_endpoints", JSON.stringify(updated));
+    try {
+      localStorage.setItem("lavinia_saved_endpoints", JSON.stringify(updated));
+    } catch {
+      // ignore storage errors
+    }
   };
 
   return (
@@ -69,7 +86,7 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
             id="target-host"
             value={host}
             disabled={disabled}
-            inputMode="decimal"
+            inputMode="url"
             spellCheck={false}
             placeholder="192.168.43.1"
             onChange={(e) => onChange({ host: e.target.value, port })}
@@ -84,7 +101,16 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
             inputMode="numeric"
             spellCheck={false}
             placeholder="1080"
-            onChange={(e) => onChange({ host, port: e.target.value.replace(/\D/g, "").slice(0, 5) })}
+            onChange={(e) => {
+              const digits = e.target.value.replace(/\D/g, "");
+              if (!digits) {
+                onChange({ host, port: "" });
+                return;
+              }
+              const num = Number.parseInt(digits, 10);
+              const clamped = num > 65535 ? 65535 : num;
+              onChange({ host, port: String(clamped) });
+            }}
           />
         </label>
       </div>
@@ -94,7 +120,8 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
           <span className="quick-label">{t.savedEndpoints}:</span>
           <div className="quick-tags">
             {savedList.map((ep) => (
-              <span
+              <button
+                type="button"
                 key={ep}
                 className={`quick-tag ${ep === `${host.trim()}:${port.trim()}` ? "active" : ""}`}
                 onClick={() => handleSelect(ep)}
@@ -104,11 +131,12 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
                   type="button"
                   className="quick-del-btn"
                   title={t.delete}
+                  aria-label={`${t.delete} ${ep}`}
                   onClick={(e) => handleDelete(ep, e)}
                 >
                   ×
                 </button>
-              </span>
+              </button>
             ))}
           </div>
         </div>
@@ -120,5 +148,7 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
 }
 
 export function toTarget(host: string, port: string): Target {
-  return { host: host.trim(), port: Number(port) };
+  const n = Number.parseInt(port.trim(), 10);
+  const validPort = Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 0;
+  return { host: host.trim(), port: validPort };
 }

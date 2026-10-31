@@ -34,12 +34,15 @@ export interface Translations {
   statsUpload: string;
   statsPackets: string;
   statsDropped: string;
+  statsTelemetry: string;
   settingsTitle: string;
   language: string;
   theme: string;
   themeDark: string;
   themeMidnight: string;
   themeOled: string;
+  autostartLabel: string;
+  autostartDesc: string;
   close: string;
   authTitle: string;
   authDesc: string;
@@ -95,12 +98,15 @@ export const DICTIONARY: Record<Lang, Translations> = {
     statsUpload: "Yükleme",
     statsPackets: "paket",
     statsDropped: "Düşen paketler",
+    statsTelemetry: "Telemetri İstatistikleri",
     settingsTitle: "Ayarlar & Görünüm",
     language: "Arayüz Dili",
     theme: "Renk Teması",
     themeDark: "Derin Gece (Standart)",
     themeMidnight: "Siber Gece (Lavinia Indigo)",
     themeOled: "Saf Siyah (OLED)",
+    autostartLabel: "Sistem Açılışında Başlat",
+    autostartDesc: "Bilgisayar açıldığında uygulamayı otomatik başlat",
     close: "Kapat",
     authTitle: "Proxy Kimlik Doğrulaması",
     authDesc: "SOCKS5 sunucusu kullanıcı adı ve parola gerektiriyor.",
@@ -154,12 +160,15 @@ export const DICTIONARY: Record<Lang, Translations> = {
     statsUpload: "Upload",
     statsPackets: "packets",
     statsDropped: "Dropped packets",
+    statsTelemetry: "Telemetry Statistics",
     settingsTitle: "Settings & Appearance",
     language: "Interface Language",
     theme: "Theme Accent",
     themeDark: "Deep Space (Standard)",
     themeMidnight: "Cyber Indigo (Lavinia)",
     themeOled: "Pure Black (OLED)",
+    autostartLabel: "Launch at Login",
+    autostartDesc: "Start Lavinia Client automatically when you log in",
     close: "Close",
     authTitle: "Proxy Authentication",
     authDesc: "SOCKS5 server requires a username and password.",

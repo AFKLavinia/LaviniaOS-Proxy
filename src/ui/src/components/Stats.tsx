@@ -7,6 +7,11 @@ export const HISTORY = 48;
 function Sparkline({ values, tone }: { values: number[]; tone: "rx" | "tx" }) {
   const w = 200;
   const h = 44;
+  if (values.length === 0) {
+    return (
+      <svg className={`spark ${tone}`} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true" />
+    );
+  }
   const max = Math.max(1, ...values);
   const step = w / (HISTORY - 1);
   const pts = values.map((v, i) => `${(i + HISTORY - values.length) * step},${h - (v / max) * (h - 4) - 2}`);
@@ -24,12 +29,12 @@ interface Props {
   latest: Telemetry;
   rxHistory: number[];
   txHistory: number[];
-  t: Translations;
+  t: Translations & { statsTelemetry?: string };
 }
 
 export function Stats({ latest, rxHistory, txHistory, t }: Props) {
   return (
-    <section className="stats" aria-label="Telemetry">
+    <section className="stats" aria-label={t.statsTelemetry ?? "Telemetry"}>
       <article className="card stat rx">
         <span className="stat-label">↓ {t.statsDownload}</span>
         <strong className="stat-value" id="stat-rx">{formatRate(latest.rxBps)}</strong>

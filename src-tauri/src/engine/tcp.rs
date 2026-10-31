@@ -16,6 +16,7 @@ use crate::platform;
 const MAX_CONNECTIONS: usize = 2048;
 const RELAY_BUF: usize = 16 * 1024;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub async fn serve(
     listener: TcpListener,
@@ -36,14 +37,27 @@ pub async fn serve(
                     };
                     let counters = counters.clone();
                     let proxy = proxy.clone();
+                    let mut task_stop = stop.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
-                        if let Err(e) = relay(client, &proxy, &counters).await {
+                        let res = tokio::select! {
+                            _ = task_stop.changed() => Ok(()),
+                            r = relay(client, &proxy, &counters) => r,
+                        };
+                        if let Err(e) = res {
                             report(&e);
                         }
                     });
                 }
                 Err(e) => {
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::ConnectionAborted
+                            | io::ErrorKind::ConnectionReset
+                            | io::ErrorKind::Interrupted
+                    ) {
+                        continue;
+                    }
                     eprintln!("tcp accept failed: {e}");
                     tokio::time::sleep(ACCEPT_BACKOFF).await;
                 }
@@ -54,20 +68,24 @@ pub async fn serve(
 
 async fn relay(client: TcpStream, proxy: &Upstream, c: &Counters) -> io::Result<()> {
     let dst = platform::original_dst(&client)?;
-    if dst.ip().is_loopback() {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "loopback destination refused"));
+    if dst.ip().is_loopback()
+        || dst.ip().is_unspecified()
+        || dst.ip().is_multicast()
+        || dst.ip().is_broadcast()
+        || SocketAddr::V4(dst).ip() == proxy.addr.ip()
+    {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "destination address refused"));
     }
     let upstream = socks5::connect(proxy, SocketAddr::V4(dst)).await?;
     client.set_nodelay(true)?;
 
     let (cr, cw) = client.into_split();
     let (ur, uw) = upstream.into_split();
-    let (up, down) = tokio::join!(
+    tokio::try_join!(
         pump(cr, uw, &c.tx_bytes, &c.tx_packets),
         pump(ur, cw, &c.rx_bytes, &c.rx_packets),
-    );
-    up?;
-    down
+    )?;
+    Ok(())
 }
 
 async fn pump<R, W>(mut r: R, mut w: W, bytes: &AtomicU64, segments: &AtomicU64) -> io::Result<()>
@@ -77,7 +95,11 @@ where
 {
     let mut buf = vec![0u8; RELAY_BUF];
     loop {
-        let n = r.read(&mut buf).await?;
+        let n = match tokio::time::timeout(IDLE_TIMEOUT, r.read(&mut buf)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "tcp relay idle timeout")),
+        };
         if n == 0 {
             return w.shutdown().await;
         }

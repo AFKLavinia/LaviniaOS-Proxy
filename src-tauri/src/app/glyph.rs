@@ -57,7 +57,12 @@ impl Canvas {
     fn image(self) -> Image<'static> {
         let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
         for p in self.px {
-            rgba.extend_from_slice(&[p[0] as u8, p[1] as u8, p[2] as u8, (p[3] * 255.0) as u8]);
+            rgba.extend_from_slice(&[
+                p[0].round().clamp(0.0, 255.0) as u8,
+                p[1].round().clamp(0.0, 255.0) as u8,
+                p[2].round().clamp(0.0, 255.0) as u8,
+                (p[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+            ]);
         }
         Image::new_owned(rgba, SIZE as u32, SIZE as u32)
     }
