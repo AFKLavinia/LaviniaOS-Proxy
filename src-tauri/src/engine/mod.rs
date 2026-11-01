@@ -1,5 +1,7 @@
 //! Transparent SOCKS5 engine. Public entry: [`Engine`], [`Counters`], [`EngineError`].
+pub mod aqm;
 mod counters;
+pub mod debloat;
 mod dns;
 mod socks5;
 mod tcp;

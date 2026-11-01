@@ -14,9 +14,9 @@ use super::Counters;
 use crate::platform;
 
 const MAX_CONNECTIONS: usize = 2048;
-const RELAY_BUF: usize = 16 * 1024;
+const RELAY_BUF: usize = 128 * 1024; // 128 KB buffer for high-throughput mobile tethering (50-200 Mbps)
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60); // 60s idle timeout to prevent ghost socket pool exhaustion
 
 pub async fn serve(
     listener: TcpListener,
@@ -78,6 +78,7 @@ async fn relay(client: TcpStream, proxy: &Upstream, c: &Counters) -> io::Result<
     }
     let upstream = socks5::connect(proxy, SocketAddr::V4(dst)).await?;
     client.set_nodelay(true)?;
+    upstream.set_nodelay(true)?;
 
     let (cr, cw) = client.into_split();
     let (ur, uw) = upstream.into_split();

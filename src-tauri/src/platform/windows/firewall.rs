@@ -74,14 +74,19 @@ pub fn apply_firewall(spec: &FirewallSpec) -> Result<Guard, PlatformError> {
         }}; \
         Remove-NetRoute -DestinationPrefix '{phone}/32' -Confirm:$false -ErrorAction SilentlyContinue; \
         Remove-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -ErrorAction SilentlyContinue; \
+        Remove-NetFirewallRule -DisplayName 'Lavinia Block DNS-53' -ErrorAction SilentlyContinue; \
+        Remove-NetFirewallRule -DisplayName 'Lavinia Block DoT-853' -ErrorAction SilentlyContinue; \
+        Remove-NetFirewallRule -DisplayName 'Lavinia Block LLMNR-5355' -ErrorAction SilentlyContinue; \
+        Remove-NetFirewallRule -DisplayName 'Lavinia Block mDNS-5353' -ErrorAction SilentlyContinue; \
         Remove-NetFirewallRule -DisplayName 'Lavinia Block Leaks' -ErrorAction SilentlyContinue; \
+        Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' -Name 'DisableSmartNameResolution' -Value 0 -Type DWord -ErrorAction SilentlyContinue; \
         Set-NetIPInterface -InterfaceAlias 'Lavinia' -InterfaceMetric 256 -ErrorAction SilentlyContinue; \
         Remove-Item -LiteralPath '{flag_str}' -Force -ErrorAction SilentlyContinue"
     );
     let watchdog_b64 = super::proc::encode_ps_base64(&watchdog_script);
 
     // 2. Setup script: finds correct physical uplink towards phone, installs /32 route,
-    //    blocks IPv6 leaks, and starts the detached background watchdog.
+    //    sets MTU to 1380, disables SMHNR, blocks external DNS leaks, and starts the detached background watchdog.
     let script = format!(
         "$uplink = Find-NetRoute -RemoteIPAddress '{phone}' -ErrorAction SilentlyContinue | Select-Object -First 1; \
          if (-not $uplink) {{ \
@@ -95,8 +100,20 @@ pub fn apply_firewall(spec: &FirewallSpec) -> Result<Guard, PlatformError> {
                  New-NetRoute -DestinationPrefix '{phone}/32' -InterfaceIndex $uplink.InterfaceIndex -PolicyStore ActiveStore -ErrorAction SilentlyContinue; \
              }} \
          }}; \
+         Set-NetIPInterface -InterfaceAlias 'Lavinia' -NlMtu 1380 -ErrorAction SilentlyContinue; \
+         $dnsPolicyPath = 'HKLM:\\SOFTWARE\\Policies\\Microsoft\\Windows NT\\DNSClient'; \
+         if (-not (Test-Path $dnsPolicyPath)) {{ New-Item -Path $dnsPolicyPath -Force | Out-Null }}; \
+         Set-ItemProperty -Path $dnsPolicyPath -Name 'DisableSmartNameResolution' -Value 1 -Type DWord -ErrorAction SilentlyContinue; \
          Remove-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -ErrorAction SilentlyContinue; \
          New-NetFirewallRule -DisplayName 'Lavinia Block IPv6' -Direction Outbound -Action Block -RemoteAddress '::/0' -ErrorAction SilentlyContinue; \
+         Remove-NetFirewallRule -DisplayName 'Lavinia Block DNS-53' -ErrorAction SilentlyContinue; \
+         New-NetFirewallRule -DisplayName 'Lavinia Block DNS-53' -Direction Outbound -Action Block -Protocol UDP,TCP -RemotePort 53 -InterfaceAlias $uplink.InterfaceAlias -ErrorAction SilentlyContinue; \
+         Remove-NetFirewallRule -DisplayName 'Lavinia Block DoT-853' -ErrorAction SilentlyContinue; \
+         New-NetFirewallRule -DisplayName 'Lavinia Block DoT-853' -Direction Outbound -Action Block -Protocol TCP -RemotePort 853 -InterfaceAlias $uplink.InterfaceAlias -ErrorAction SilentlyContinue; \
+         Remove-NetFirewallRule -DisplayName 'Lavinia Block LLMNR-5355' -ErrorAction SilentlyContinue; \
+         New-NetFirewallRule -DisplayName 'Lavinia Block LLMNR-5355' -Direction Outbound -Action Block -Protocol UDP -RemotePort 5355 -InterfaceAlias $uplink.InterfaceAlias -ErrorAction SilentlyContinue; \
+         Remove-NetFirewallRule -DisplayName 'Lavinia Block mDNS-5353' -ErrorAction SilentlyContinue; \
+         New-NetFirewallRule -DisplayName 'Lavinia Block mDNS-5353' -Direction Outbound -Action Block -Protocol UDP -RemotePort 5353 -InterfaceAlias $uplink.InterfaceAlias -ErrorAction SilentlyContinue; \
          Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-EncodedCommand','{watchdog_b64}'"
     );
 

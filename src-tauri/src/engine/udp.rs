@@ -16,7 +16,7 @@ use crate::platform;
 
 const MAX_SESSIONS: usize = 1024;
 const MAX_DATAGRAM: usize = 65_535;
-const SESSION_QUEUE: usize = 256;
+const SESSION_QUEUE: usize = 32; // Reduced from 256 to 32 to prevent bufferbloat and memory exhaustion
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 type Key = (SocketAddrV4, SocketAddrV4);
