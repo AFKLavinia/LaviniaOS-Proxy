@@ -30,6 +30,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png"],
+    "resources": [
+      "resources/bin/*",
+      "wintun.dll"
+    ]
   }
 }
