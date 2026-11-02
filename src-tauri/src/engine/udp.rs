@@ -10,6 +10,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch, Semaphore};
 
+use super::debloat;
 use super::socks5::{self, Upstream};
 use super::Counters;
 use crate::platform;
@@ -101,6 +102,10 @@ async fn session(
     let upstream = UdpSocket::bind(bind_addr).await?;
     upstream.connect(relay).await?;
     let reply = UdpSocket::from_std(platform::udp_spoof_socket(dst)?)?;
+
+    let sock = socket2::SockRef::from(&upstream);
+    let dscp = debloat::classify_traffic(&SocketAddr::V4(dst), 0, true);
+    let _ = sock.set_tos(dscp.to_tos() as u32);
 
     let mut down = vec![0u8; MAX_DATAGRAM];
     let mut ctl = [0u8; 1];

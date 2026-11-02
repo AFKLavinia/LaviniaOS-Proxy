@@ -47,9 +47,25 @@ export function Stats({ latest, rxHistory, txHistory, t }: Props) {
         <Sparkline values={txHistory} tone="tx" />
         <span className="stat-sub">{formatCount(latest.txPackets)} {t.statsPackets}</span>
       </article>
-      <article className="card stat wide">
-        <span className="stat-label">{t.statsDropped}</span>
-        <strong className="stat-value small" id="stat-drop">{formatCount(latest.dropped)}</strong>
+      <article className="card stat wide ping">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div>
+            <span className="stat-label">⚡ Ping (RTT)</span>
+            <strong className="stat-value small" style={{ color: latest.rttMs > 0 && latest.rttMs < 60 ? "#4ade80" : latest.rttMs >= 60 && latest.rttMs < 120 ? "#facc15" : undefined }}>
+              {latest.rttMs > 0 ? `${latest.rttMs} ms` : "—"}
+            </strong>
+          </div>
+          <div>
+            <span className="stat-label">Jitter</span>
+            <strong className="stat-value small">
+              {latest.jitterMs > 0 ? `${latest.jitterMs} ms` : "—"}
+            </strong>
+          </div>
+          <div>
+            <span className="stat-label">{t.statsDropped}</span>
+            <strong className="stat-value small" id="stat-drop">{formatCount(latest.dropped)}</strong>
+          </div>
+        </div>
       </article>
     </section>
   );

@@ -3,7 +3,7 @@ use std::os::raw::c_char;
 
 #[repr(C)]
 pub struct LvTun {
-    _marker: core::marker::PhantomData<(*mut u8, core::marker::PhantomPinned)>,
+    _private: [u8; 0],
 }
 
 pub const LV_OK: i32 = 0;

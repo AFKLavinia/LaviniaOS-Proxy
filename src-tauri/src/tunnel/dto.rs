@@ -150,6 +150,8 @@ pub struct Telemetry {
     pub rx_packets: u64,
     pub tx_packets: u64,
     pub dropped: u64,
+    pub rtt_ms: u64,
+    pub jitter_ms: u64,
 }
 
 #[derive(Debug)]

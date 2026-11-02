@@ -9,6 +9,10 @@ pub struct Counters {
     pub rx_packets: AtomicU64,
     pub tx_packets: AtomicU64,
     pub dropped: AtomicU64,
+    /// Live round-trip time in milliseconds to upstream proxy.
+    pub rtt_ms: AtomicU64,
+    /// Jitter in milliseconds.
+    pub jitter_ms: AtomicU64,
     /// True while the SOCKS5 upstream answered the most recent health probe.
     pub link_up: AtomicBool,
 }
@@ -20,6 +24,8 @@ impl Counters {
         self.rx_packets.store(0, Ordering::Relaxed);
         self.tx_packets.store(0, Ordering::Relaxed);
         self.dropped.store(0, Ordering::Relaxed);
+        self.rtt_ms.store(0, Ordering::Relaxed);
+        self.jitter_ms.store(0, Ordering::Relaxed);
         self.link_up.store(false, Ordering::Relaxed);
     }
 }

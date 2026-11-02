@@ -50,6 +50,12 @@ impl FlowBucket {
     }
 }
 
+impl Default for FlowBucket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct FqCodelQueue {
     buckets: Vec<FlowBucket>,
     new_flows: VecDeque<usize>,

@@ -69,6 +69,8 @@ pub fn spawn_telemetry(app: &AppHandle) {
                 rx_packets: c.rx_packets.load(Ordering::Relaxed),
                 tx_packets: c.tx_packets.load(Ordering::Relaxed),
                 dropped: c.dropped.load(Ordering::Relaxed),
+                rtt_ms: c.rtt_ms.load(Ordering::Relaxed),
+                jitter_ms: c.jitter_ms.load(Ordering::Relaxed),
             };
             (last_rx, last_tx) = (rx, tx);
             if let Err(e) = app.emit(TELEMETRY_EVENT, payload) {

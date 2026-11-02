@@ -7,7 +7,7 @@ use super::proc::privileged_sh;
 use crate::platform::{FirewallSpec, PlatformError};
 
 const TABLE: &str = "lavinia";
-const WATCHDOG_TICK_SECS: u32 = 1;
+const WATCHDOG_TICK_SECS: &str = "0.2";
 const FWMARK: &str = "0x4c41";
 const ROUTE_TABLE: u32 = 4177;
 const PRIVATE_NETS: &str = "10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16";
@@ -103,7 +103,8 @@ fn ruleset(spec: &FirewallSpec) -> String {
                  oifname \"lo\" accept\n\
                  udp dport 53 reject\n\
                  tcp dport 53 reject\n\
-                 ip6 daddr fe80::/10 accept\n\
+                 ip6 daddr {{ fe80::/10, ff02::/16 }} accept\n\
+                meta l4proto ipv6-icmp accept\n\
                  reject\n\
                }}\n\
              }}\n",
@@ -122,8 +123,9 @@ fn ruleset(spec: &FirewallSpec) -> String {
              type nat hook output priority -100; policy accept;\n\
              ip daddr 127.0.0.0/8 return\n\
              ip daddr {phone} return\n\
-             ip daddr {{ {private} }} return\n\
              udp dport 53 redirect to :{dns}\n\
+             tcp dport 53 redirect to :{tcp}\n\
+             ip daddr {{ {private} }} return\n\
              meta l4proto tcp redirect to :{tcp}\n\
            }}\n\
            {udp_chains}\

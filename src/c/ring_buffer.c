@@ -7,9 +7,6 @@ int lv_ring_init(lv_ring_t *r, uint32_t slots) {
     if (r == NULL || slots < 2u || slots > 65536u || (slots & (slots - 1u)) != 0u) {
         return LV_ERR_INVALID_ARG;
     }
-    if ((size_t)slots > SIZE_MAX / sizeof(lv_slot_t)) {
-        return LV_ERR_INVALID_ARG;
-    }
     memset(r, 0, sizeof(*r));
     r->slots = (lv_slot_t *)calloc(slots, sizeof(lv_slot_t));
     if (r->slots == NULL) {

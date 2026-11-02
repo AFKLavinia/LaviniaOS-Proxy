@@ -1,9 +1,10 @@
 //! DNS over SOCKS5: UDP queries are forwarded as DNS-over-TCP to a fixed upstream resolver.
+use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
@@ -18,6 +19,9 @@ pub const DEFAULT_RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 const MAX_INFLIGHT: usize = 256;
 const MAX_DATAGRAM: usize = 4096;
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+type DnsCache = Arc<Mutex<HashMap<Vec<u8>, (Vec<u8>, Instant)>>>;
 
 pub async fn serve(
     socket: UdpSocket,
@@ -28,6 +32,7 @@ pub async fn serve(
 ) {
     let socket = Arc::new(socket);
     let permits = Arc::new(Semaphore::new(MAX_INFLIGHT));
+    let cache: DnsCache = Arc::new(Mutex::new(HashMap::new()));
     let mut buf = vec![0u8; MAX_DATAGRAM];
     loop {
         tokio::select! {
@@ -38,6 +43,33 @@ pub async fn serve(
                         counters.dropped.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
+
+                    let query_key = buf[2..n].to_vec();
+                    let cached_answer = {
+                        let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+                        if let Some((ans, expiry)) = c.get(&query_key) {
+                            if Instant::now() < *expiry {
+                                let mut reply = ans.clone();
+                                reply[0..2].copy_from_slice(&buf[0..2]);
+                                Some(reply)
+                            } else {
+                                c.remove(&query_key);
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    };
+
+                    if let Some(answer) = cached_answer {
+                        let _ = socket.send_to(&answer, peer).await;
+                        counters.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+                        counters.tx_packets.fetch_add(1, Ordering::Relaxed);
+                        counters.rx_bytes.fetch_add(answer.len() as u64, Ordering::Relaxed);
+                        counters.rx_packets.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+
                     // Over capacity: drop the query; the stub resolver retries.
                     let Ok(permit) = permits.clone().try_acquire_owned() else {
                         counters.dropped.fetch_add(1, Ordering::Relaxed);
@@ -47,10 +79,18 @@ pub async fn serve(
                     let socket = socket.clone();
                     let proxy = proxy.clone();
                     let counters = counters.clone();
+                    let cache = cache.clone();
                     tokio::spawn(async move {
                         let _permit = permit;
                         match resolve(&query, &proxy, resolver).await {
                             Ok(answer) => {
+                                {
+                                    let mut c = cache.lock().unwrap_or_else(|p| p.into_inner());
+                                    if c.len() > 1024 {
+                                        c.clear();
+                                    }
+                                    c.insert(query_key, (answer.clone(), Instant::now() + CACHE_TTL));
+                                }
                                 if let Err(e) = socket.send_to(&answer, peer).await {
                                     eprintln!("dns reply failed: {e}");
                                 }
@@ -82,7 +122,65 @@ pub async fn serve(
     }
 }
 
+fn is_ad_or_tracker(query: &[u8]) -> bool {
+    if query.len() < 13 {
+        return false;
+    }
+    let mut idx = 12;
+    let mut parts: Vec<String> = Vec::new();
+    while idx < query.len() {
+        let len = query[idx] as usize;
+        if len == 0 {
+            break;
+        }
+        idx += 1;
+        if idx + len > query.len() {
+            return false;
+        }
+        if let Ok(s) = std::str::from_utf8(&query[idx..idx + len]) {
+            parts.push(s.to_ascii_lowercase());
+        }
+        idx += len;
+    }
+    let domain = parts.join(".");
+    let blocked_patterns = [
+        "doubleclick.net",
+        "googleadservices.com",
+        "googlesyndication.com",
+        "adnxs.com",
+        "criteo.com",
+        "taboola.com",
+        "outbrain.com",
+        "scorecardresearch.com",
+        "analytics.google.com",
+        "telemetry",
+    ];
+    blocked_patterns.iter().any(|pattern| domain.contains(pattern))
+}
+
+fn build_blocked_response(query: &[u8]) -> Vec<u8> {
+    let mut resp = Vec::with_capacity(query.len() + 16);
+    resp.extend_from_slice(&query[..12]);
+    resp[2] = 0x81; // QR=1, AA=0, TC=0, RD=1
+    resp[3] = 0x80; // RA=1, Z=0, RCODE=0 (No error)
+    resp[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
+
+    let mut qend = 12;
+    while qend < query.len() && query[qend] != 0 {
+        qend += (query[qend] as usize) + 1;
+    }
+    qend = (qend + 5).min(query.len()); // 0x00 + QTYPE + QCLASS
+    resp.extend_from_slice(&query[12..qend]);
+
+    // Answer record: pointer to name (0xC00C), Type A (1), Class IN (1), TTL (60s), Length (4), IP (0.0.0.0)
+    resp.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]);
+    resp
+}
+
 async fn resolve(query: &[u8], proxy: &Upstream, resolver: Ipv4Addr) -> io::Result<Vec<u8>> {
+    if is_ad_or_tracker(query) {
+        return Ok(build_blocked_response(query));
+    }
     match timeout(QUERY_TIMEOUT, exchange(query, proxy, resolver)).await {
         Ok(r) => r,
         Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "dns upstream timed out")),

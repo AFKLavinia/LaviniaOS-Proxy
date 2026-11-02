@@ -1,22 +1,34 @@
 //! Transparent TCP relay: redirected connection -> original dst -> SOCKS5 upstream.
 use std::io;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
 
+use super::debloat;
 use super::socks5::{self, Upstream};
 use super::Counters;
 use crate::platform;
 
 const MAX_CONNECTIONS: usize = 2048;
-const RELAY_BUF: usize = 128 * 1024; // 128 KB buffer for high-throughput mobile tethering (50-200 Mbps)
+const RELAY_BUF: usize = 64 * 1024;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
-const IDLE_TIMEOUT: Duration = Duration::from_secs(60); // 60s idle timeout to prevent ghost socket pool exhaustion
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn apply_socket_opts(stream: &TcpStream, dst: &SocketAddr) {
+    let socket = socket2::SockRef::from(stream);
+    let dscp = debloat::classify_traffic(dst, 0, false);
+    let tos = dscp.to_tos() as u32;
+    let _ = socket.set_tos(tos);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(10));
+    let _ = socket.set_tcp_keepalive(&keepalive);
+}
 
 pub async fn serve(
     listener: TcpListener,
@@ -79,35 +91,51 @@ async fn relay(client: TcpStream, proxy: &Upstream, c: &Counters) -> io::Result<
     let upstream = socks5::connect(proxy, SocketAddr::V4(dst)).await?;
     client.set_nodelay(true)?;
     upstream.set_nodelay(true)?;
+    apply_socket_opts(&client, &SocketAddr::V4(dst));
+    apply_socket_opts(&upstream, &SocketAddr::V4(dst));
 
-    let (cr, cw) = client.into_split();
-    let (ur, uw) = upstream.into_split();
-    tokio::try_join!(
-        pump(cr, uw, &c.tx_bytes, &c.tx_packets),
-        pump(ur, cw, &c.rx_bytes, &c.rx_packets),
-    )?;
-    Ok(())
-}
+    let (mut cr, mut cw) = client.into_split();
+    let (mut ur, mut uw) = upstream.into_split();
 
-async fn pump<R, W>(mut r: R, mut w: W, bytes: &AtomicU64, segments: &AtomicU64) -> io::Result<()>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut buf = vec![0u8; RELAY_BUF];
-    loop {
-        let n = match tokio::time::timeout(IDLE_TIMEOUT, r.read(&mut buf)).await {
-            Ok(Ok(n)) => n,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err(io::Error::new(io::ErrorKind::TimedOut, "tcp relay idle timeout")),
-        };
-        if n == 0 {
-            return w.shutdown().await;
+    let client_to_upstream = async {
+        let mut buf = vec![0u8; RELAY_BUF];
+        loop {
+            let n = cr.read(&mut buf).await?;
+            if n == 0 {
+                uw.shutdown().await?;
+                break;
+            }
+            uw.write_all(&buf[..n]).await?;
+            c.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            c.tx_packets.fetch_add(1, Ordering::Relaxed);
         }
-        w.write_all(&buf[..n]).await?;
-        bytes.fetch_add(n as u64, Ordering::Relaxed);
-        segments.fetch_add(1, Ordering::Relaxed);
+        Ok::<(), io::Error>(())
+    };
+
+    let upstream_to_client = async {
+        let mut buf = vec![0u8; RELAY_BUF];
+        loop {
+            let n = ur.read(&mut buf).await?;
+            if n == 0 {
+                cw.shutdown().await?;
+                break;
+            }
+            cw.write_all(&buf[..n]).await?;
+            c.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            c.rx_packets.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok::<(), io::Error>(())
+    };
+
+    tokio::select! {
+        res = async { tokio::try_join!(client_to_upstream, upstream_to_client) } => {
+            res?;
+        }
+        _ = tokio::time::sleep(IDLE_TIMEOUT) => {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "tcp relay idle timeout"));
+        }
     }
+    Ok(())
 }
 
 /// Peer resets/closes are normal relay termination; anything else is logged.

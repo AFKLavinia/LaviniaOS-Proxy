@@ -35,6 +35,8 @@ export interface Telemetry {
   rxPackets: number;
   txPackets: number;
   dropped: number;
+  rttMs: number;
+  jitterMs: number;
 }
 
 /** Single IPC gateway: the UI performs no system calls or FFI. */

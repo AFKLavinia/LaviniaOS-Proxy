@@ -90,3 +90,9 @@ impl TokenBucketPacer {
         }
     }
 }
+
+impl Default for TokenBucketPacer {
+    fn default() -> Self {
+        Self::new()
+    }
+}

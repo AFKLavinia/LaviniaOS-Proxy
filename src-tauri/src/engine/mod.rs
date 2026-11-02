@@ -27,7 +27,6 @@ use socks5::Upstream;
 
 use crate::platform::{self, FirewallGuard, FirewallSpec, PlatformError, Uplink};
 
-const WORKER_THREADS: usize = 2;
 /// Time the privileged watchdog needs to notice the released flag and delete the rules.
 const WATCHDOG_GRACE: Duration = Duration::from_millis(150);
 const PROBE_INTERVAL: Duration = Duration::from_secs(2);
@@ -36,6 +35,9 @@ const PROBE_FAILURES_TO_DOWN: u32 = 2;
 /// Periodically probes the SOCKS5 upstream and publishes link health through the counters.
 async fn monitor(proxy: Upstream, counters: Arc<Counters>, mut stop: watch::Receiver<bool>) {
     let mut failures = 0u32;
+    let mut last_rtt: Option<u64> = None;
+    let mut jitter: f64 = 0.0;
+
     loop {
         tokio::select! {
             _ = stop.changed() => break,
@@ -46,14 +48,23 @@ async fn monitor(proxy: Upstream, counters: Arc<Counters>, mut stop: watch::Rece
             r = socks5::probe(&proxy) => r,
         };
         match probe_result {
-            Ok(()) => {
+            Ok(dur) => {
                 failures = 0;
                 counters.link_up.store(true, Ordering::Relaxed);
+                let ms = dur.as_millis() as u64;
+                counters.rtt_ms.store(ms, Ordering::Relaxed);
+                if let Some(prev) = last_rtt {
+                    let diff = (ms as f64 - prev as f64).abs();
+                    jitter = jitter + (diff - jitter) / 16.0;
+                    counters.jitter_ms.store(jitter as u64, Ordering::Relaxed);
+                }
+                last_rtt = Some(ms);
             }
             Err(_) => {
                 failures = failures.saturating_add(1);
                 if failures >= PROBE_FAILURES_TO_DOWN {
                     counters.link_up.store(false, Ordering::Relaxed);
+                    counters.rtt_ms.store(0, Ordering::Relaxed);
                 }
             }
         }
@@ -120,8 +131,13 @@ impl Engine {
     ) -> Result<Self, EngineError> {
         let uplink = platform::check_uplink(phone)?;
 
+        let worker_threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(2, 16);
+
         let runtime = Builder::new_multi_thread()
-            .worker_threads(WORKER_THREADS)
+            .worker_threads(worker_threads)
             .thread_name("lavinia-engine")
             .enable_all()
             .build()?;

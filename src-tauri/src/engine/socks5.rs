@@ -104,11 +104,14 @@ pub async fn connect(proxy: &Upstream, dst: SocketAddr) -> io::Result<TcpStream>
     with_timeout(HANDSHAKE_TIMEOUT, "socks5 handshake timed out", handshake(proxy, dst)).await
 }
 
-/// Health probe: TCP connect plus SOCKS5 negotiation (including auth) only.
-pub async fn probe(proxy: &Upstream) -> io::Result<()> {
+/// Health probe: TCP connect plus SOCKS5 negotiation (including auth) only. Returns RTT duration.
+pub async fn probe(proxy: &Upstream) -> io::Result<Duration> {
     let negotiate = async {
+        let start = std::time::Instant::now();
         let mut s = TcpStream::connect(proxy.addr).await?;
-        negotiate(&mut s, proxy).await
+        s.set_nodelay(true)?;
+        negotiate(&mut s, proxy).await?;
+        Ok(start.elapsed())
     };
     with_timeout(PROBE_TIMEOUT, "socks5 probe timed out", negotiate).await
 }

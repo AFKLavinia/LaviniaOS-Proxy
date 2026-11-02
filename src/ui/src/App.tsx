@@ -10,7 +10,7 @@ import { PowerButton } from "./components/PowerButton";
 import { HISTORY, Stats } from "./components/Stats";
 import { TargetForm, toTarget } from "./components/TargetForm";
 
-const EMPTY: Telemetry = { phase: "stopped", rxBps: 0, txBps: 0, rxPackets: 0, txPackets: 0, dropped: 0 };
+const EMPTY: Telemetry = { phase: "stopped", rxBps: 0, txBps: 0, rxPackets: 0, txPackets: 0, dropped: 0, rttMs: 0, jitterMs: 0 };
 
 function push(list: number[], v: number): number[] {
   return [...list, v].slice(-HISTORY);
