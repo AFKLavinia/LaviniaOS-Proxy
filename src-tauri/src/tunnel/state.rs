@@ -109,24 +109,24 @@ impl TunnelState {
 
         match started {
             Ok(engine) => {
-                let cancelled = {
+                let to_stop = {
                     let mut g = self.lock();
                     if g.cancel_start || g.phase != Phase::Starting {
                         g.phase = Phase::Stopped;
                         g.cancel_start = false;
-                        true
+                        Some(engine)
                     } else {
                         g.link = Some((engine.uplink().clone(), engine.udp_mode()));
                         g.engine = Some(engine);
                         g.phase = Phase::Running;
-                        false
+                        None
                     }
                 };
 
-                if cancelled {
+                if let Some(orphan) = to_stop {
                     // Start was cancelled or stop was requested while Engine::start was running.
                     // Shut down the orphan engine immediately outside the state lock.
-                    engine.stop();
+                    orphan.stop();
                     let g = self.lock();
                     return Ok(Self::snapshot(&g, Phase::Stopped));
                 }

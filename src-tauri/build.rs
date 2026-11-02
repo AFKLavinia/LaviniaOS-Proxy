@@ -41,4 +41,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../src/c/platform/windows/tun_windows.c");
 
     tauri_build::build();
+    if target_os == "linux" {
+        // Lets the binary find user-local libs (e.g. libayatana-appindicator3) without LD_LIBRARY_PATH.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        if let Ok(home) = std::env::var("HOME") {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{home}/.local/lib");
+        }
+    }
 }

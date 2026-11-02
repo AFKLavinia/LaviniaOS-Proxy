@@ -62,7 +62,7 @@ fn udp_chains(phone: &std::net::Ipv4Addr, udp_port: &u16) -> String {
     format!(
         "chain mark_out {{\n\
            type route hook output priority -150; policy accept;\n\
-           socket transparent return\n\
+           socket transparent 1 return\n\
            fib daddr type {{ local, broadcast, multicast }} return\n\
            ip daddr 127.0.0.0/8 return\n\
            ip daddr 255.255.255.255 return\n\

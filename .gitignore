@@ -31,3 +31,6 @@ Thumbs.db
 tmp/
 scratch/
 *.tmp
+
+# Root dev helpers
+node_modules

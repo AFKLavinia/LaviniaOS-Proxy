@@ -11,11 +11,27 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Runs a shell script with root privileges (directly if already root, otherwise via polkit).
+/// True when a sudo credential is already cached (e.g. `start.sh` ran `sudo -v`), so no prompt is needed.
+fn sudo_cached() -> bool {
+    Command::new("sudo")
+        .args(["-n", "true"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Runs a shell script with root privileges: directly if root, via cached sudo if available, otherwise via polkit.
 pub fn privileged_sh(script: &str) -> Result<(), PlatformError> {
     let mut cmd = if is_root() {
         let mut c = Command::new("/bin/sh");
         c.arg("-c").arg(script);
+        c
+    } else if sudo_cached() {
+        let mut c = Command::new("sudo");
+        c.args(["-n", "/bin/sh", "-c"]).arg(script);
         c
     } else {
         let mut c = Command::new("pkexec");

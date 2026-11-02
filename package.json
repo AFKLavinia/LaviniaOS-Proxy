@@ -1,0 +1,14 @@
+{
+  "name": "lavinia-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "./start.sh",
+    "build": "./node_modules/.bin/tauri build"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

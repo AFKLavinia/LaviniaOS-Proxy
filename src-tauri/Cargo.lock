@@ -1650,6 +1650,7 @@ dependencies = [
 name = "lavinia-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "cc",
  "libc",
  "serde",
