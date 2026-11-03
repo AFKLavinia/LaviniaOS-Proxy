@@ -96,7 +96,13 @@ export function SettingsModal({ t, lang, theme, onLangChange, onThemeChange, onC
   const autostartLabel = t.autostartLabel || (lang === "tr" ? "Başlangıçta Otomatik Başlat" : "Launch on system startup");
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div
         className="modal settings-modal"
         role="dialog"

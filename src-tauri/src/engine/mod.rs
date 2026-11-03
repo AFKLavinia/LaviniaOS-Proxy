@@ -1,8 +1,12 @@
 //! Transparent SOCKS5 engine. Public entry: [`Engine`], [`Counters`], [`EngineError`].
 pub mod aqm;
+pub mod aqm_controller;
+pub mod bicast;
+pub mod classifier;
 mod counters;
 pub mod debloat;
 mod dns;
+pub mod game_detector;
 mod socks5;
 mod tcp;
 mod udp;

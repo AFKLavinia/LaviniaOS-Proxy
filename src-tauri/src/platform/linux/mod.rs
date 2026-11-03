@@ -3,6 +3,7 @@ mod autostart;
 mod firewall;
 mod network;
 mod proc;
+pub mod split_tunnel;
 
 pub use autostart::{is_enabled as autostart_enabled, set_enabled as set_autostart};
 pub use firewall::{apply_firewall, Guard};
@@ -182,13 +183,18 @@ fn recv_once(fd: libc::c_int, buf: &mut [u8]) -> io::Result<(usize, SocketAddrV4
 
 /// Grants CAP_NET_ADMIN to the running executable through polkit (credentials are asked by the system prompt).
 pub fn grant_net_admin() -> Result<(), PlatformError> {
-    let exe = std::env::current_exe()?;
-    let path = exe.to_str().ok_or_else(|| {
-        PlatformError::Command("executable path is not valid UTF-8".into())
-    })?;
-    if path.contains(['\0', '\n']) {
-        return Err(PlatformError::Command("executable path contains unsafe characters".into()));
+    let current = std::env::current_exe().ok();
+    let path_str = current.as_ref().and_then(|p| p.to_str()).unwrap_or("/usr/bin/lavinia-client");
+    let target = if path_str == "/usr/local/bin/lavinia-client" {
+        "/usr/local/bin/lavinia-client"
+    } else {
+        "/usr/bin/lavinia-client"
+    };
+
+    if proc::helper_available() {
+        proc::privileged_helper(&["grant-capabilities", target])
+    } else {
+        let escaped = target.replace('\'', "'\\''");
+        proc::privileged_sh(&format!("setcap cap_net_admin+ep '{escaped}'"))
     }
-    let escaped = path.replace('\'', "'\\''");
-    proc::privileged_sh(&format!("setcap cap_net_admin+ep '{escaped}'"))
 }

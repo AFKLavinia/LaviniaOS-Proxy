@@ -1,5 +1,6 @@
 //! Tray-resident Tauri shell. Public entry point: [`run`].
 mod glyph;
+pub mod notifier;
 mod tray;
 mod window;
 
@@ -30,6 +31,7 @@ pub fn run() {
                 Ok(dir) => tunnel::restore_last_target(&app.state::<TunnelState>(), &dir),
                 Err(e) => eprintln!("config dir unavailable: {e}"),
             }
+            crate::engine::game_detector::spawn_game_detector();
             tunnel::spawn_telemetry(app.handle());
             spawn_tray_sync(app.handle());
             window::spawn_fallback_show(app.handle());

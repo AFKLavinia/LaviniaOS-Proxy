@@ -41,7 +41,13 @@ export function AuthModal({ host, port, t, onConfirm, onDismiss, onCancel }: Pro
   };
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={handleDismiss}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) handleDismiss();
+      }}
+    >
       <div
         className="modal"
         role="dialog"

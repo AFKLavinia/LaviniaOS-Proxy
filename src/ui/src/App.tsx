@@ -153,6 +153,9 @@ export function App() {
         if (!active) return;
         setLatest(tel);
         setPhase(tel.phase);
+        if (tel.phase === "stopped") {
+          setInfo({ link: null, udp: null });
+        }
         setRxHistory((h) => push(h, tel.rxBps));
         setTxHistory((h) => push(h, tel.txBps));
       })
@@ -256,6 +259,9 @@ export function App() {
           }
           setHost(n.host);
           setPort(n.port);
+        }}
+        onCredentialsDetected={(user, pass) => {
+          setAuth({ username: user, password: pass });
         }}
       />
       <LinkInfo

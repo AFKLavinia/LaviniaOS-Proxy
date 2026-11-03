@@ -63,10 +63,10 @@ pub async fn serve(
 
                     if let Some(answer) = cached_answer {
                         let _ = socket.send_to(&answer, peer).await;
-                        counters.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-                        counters.tx_packets.fetch_add(1, Ordering::Relaxed);
-                        counters.rx_bytes.fetch_add(answer.len() as u64, Ordering::Relaxed);
+                        counters.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
                         counters.rx_packets.fetch_add(1, Ordering::Relaxed);
+                        counters.tx_bytes.fetch_add(answer.len() as u64, Ordering::Relaxed);
+                        counters.tx_packets.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
 
@@ -163,7 +163,8 @@ fn build_blocked_response(query: &[u8]) -> Vec<u8> {
     resp.extend_from_slice(&query[..12]);
     resp[2] = 0x81; // QR=1, AA=0, TC=0, RD=1
     resp[3] = 0x80; // RA=1, Z=0, RCODE=0 (No error)
-    resp[6..8].copy_from_slice(&1u16.to_be_bytes()); // ANCOUNT = 1
+    resp[8..10].copy_from_slice(&0u16.to_be_bytes());  // NSCOUNT = 0
+    resp[10..12].copy_from_slice(&0u16.to_be_bytes()); // ARCOUNT = 0 (strip EDNS0 OPT mismatch)
 
     let mut qend = 12;
     while qend < query.len() && query[qend] != 0 {
@@ -172,8 +173,21 @@ fn build_blocked_response(query: &[u8]) -> Vec<u8> {
     qend = (qend + 5).min(query.len()); // 0x00 + QTYPE + QCLASS
     resp.extend_from_slice(&query[12..qend]);
 
-    // Answer record: pointer to name (0xC00C), Type A (1), Class IN (1), TTL (60s), Length (4), IP (0.0.0.0)
-    resp.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]);
+    let qtype = if qend >= 4 {
+        u16::from_be_bytes([query[qend - 4], query[qend - 3]])
+    } else {
+        1
+    };
+
+    if qtype == 1 {
+        // A record: 1 answer, 0.0.0.0
+        resp[6..8].copy_from_slice(&1u16.to_be_bytes());
+        // Answer record: pointer to name (0xC00C), Type A (1), Class IN (1), TTL (60s), Length (4), IP (0.0.0.0)
+        resp.extend_from_slice(&[0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00]);
+    } else {
+        // Return NODATA (ANCOUNT = 0, NOERROR) for AAAA/HTTPS/etc. to prevent resolver corruption
+        resp[6..8].copy_from_slice(&0u16.to_be_bytes());
+    }
     resp
 }
 

@@ -71,6 +71,7 @@ pub fn spawn_telemetry(app: &AppHandle) {
                 dropped: c.dropped.load(Ordering::Relaxed),
                 rtt_ms: c.rtt_ms.load(Ordering::Relaxed),
                 jitter_ms: c.jitter_ms.load(Ordering::Relaxed),
+                game_mode: crate::engine::game_detector::is_game_active(),
             };
             (last_rx, last_tx) = (rx, tx);
             if let Err(e) = app.emit(TELEMETRY_EVENT, payload) {

@@ -61,6 +61,9 @@ export interface Translations {
   savedEndpoints: string;
   emptyEndpoints: string;
   delete: string;
+  debloatDisabled: string;
+  debloatGameMode: string;
+  debloatActive: string;
 }
 
 export const DICTIONARY: Record<Lang, Translations> = {
@@ -125,6 +128,9 @@ export const DICTIONARY: Record<Lang, Translations> = {
     savedEndpoints: "Hızlı Seçim",
     emptyEndpoints: "Henüz kayıtlı bir uç nokta yok.",
     delete: "Sil",
+    debloatDisabled: "Devre Dışı",
+    debloatGameMode: "Oyun Modu (140ms)",
+    debloatActive: "Aktif (90ms)",
   },
   en: {
     appName: "Lavinia",
@@ -187,5 +193,8 @@ export const DICTIONARY: Record<Lang, Translations> = {
     savedEndpoints: "Quick Select",
     emptyEndpoints: "No saved endpoints yet.",
     delete: "Delete",
+    debloatDisabled: "Inactive",
+    debloatGameMode: "Game Mode (140ms)",
+    debloatActive: "Active (90ms)",
   },
 };

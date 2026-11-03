@@ -37,6 +37,7 @@ export interface Telemetry {
   dropped: number;
   rttMs: number;
   jitterMs: number;
+  gameMode?: boolean;
 }
 
 /** Single IPC gateway: the UI performs no system calls or FFI. */

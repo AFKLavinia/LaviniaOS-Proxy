@@ -152,6 +152,7 @@ pub struct Telemetry {
     pub dropped: u64,
     pub rtt_ms: u64,
     pub jitter_ms: u64,
+    pub game_mode: bool,
 }
 
 #[derive(Debug)]

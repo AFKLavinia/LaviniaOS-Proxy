@@ -1,0 +1,25 @@
+# Maintainer: Alper <alper@laviniaos.org>
+pkgname=lavinia-proxy-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="LaviniaOS High-Performance Zero-Loss Transparent Proxy Client"
+arch=('x86_64')
+url="https://github.com/LaviniaOS/LaviniaOS-Proxy"
+license=('custom')
+depends=('gtk3' 'webkit2gtk-4.1' 'nftables' 'polkit' 'iproute2')
+optdepends=('libnotify: Desktop notifications')
+provides=('lavinia-client')
+conflicts=('lavinia-client')
+
+package() {
+    # Binaries
+    install -Dm755 "${srcdir}/lavinia-client" "${pkgdir}/usr/bin/lavinia-client"
+    install -Dm755 "${srcdir}/deploy/polkit/lavinia-net-helper" "${pkgdir}/usr/lib/lavinia/lavinia-net-helper"
+
+    # Polkit policy
+    install -Dm644 "${srcdir}/deploy/polkit/os.lavinia.client.policy" "${pkgdir}/usr/share/polkit-1/actions/os.lavinia.client.policy"
+
+    # Desktop entry & Icon
+    install -Dm644 "${srcdir}/deploy/lavinia-client.desktop" "${pkgdir}/usr/share/applications/lavinia-client.desktop"
+}
+

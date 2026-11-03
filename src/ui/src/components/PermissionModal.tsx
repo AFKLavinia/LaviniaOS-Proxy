@@ -31,7 +31,13 @@ export function PermissionModal({ busy, t, onGrant, onDismiss, onClose }: Props)
   }, [busy, onClose, onDismiss]);
 
   return (
-    <div className="modal-backdrop" role="presentation" onClick={handleClose}>
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) handleClose();
+      }}
+    >
       <div
         className="modal"
         role="dialog"

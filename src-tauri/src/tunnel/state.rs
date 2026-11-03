@@ -1,38 +1,46 @@
 use std::net::IpAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use super::dto::{Phase, StartOptions, Status, Target, TunnelError};
 use crate::engine::{Counters, Engine, UdpMode};
 use crate::platform::Uplink;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InternalPhase {
+    Stopped,
+    Starting,
+    Running,
+    Stopping,
+}
+
 struct Inner {
-    phase: Phase,
+    phase: InternalPhase,
     target: Target,
     engine: Option<Engine>,
     link: Option<(Uplink, UdpMode)>,
-    cancel_start: bool,
+    cancel_requested: bool,
 }
 
 #[derive(Clone)]
 pub struct TunnelState {
     inner: Arc<Mutex<Inner>>,
+    phase_cv: Arc<Condvar>,
     pub counters: Arc<Counters>,
-    teardown: Arc<Mutex<()>>,
 }
 
 impl TunnelState {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(Inner {
-                phase: Phase::Stopped,
+                phase: InternalPhase::Stopped,
                 target: Target::default_phone(),
                 engine: None,
                 link: None,
-                cancel_start: false,
+                cancel_requested: false,
             })),
+            phase_cv: Arc::new(Condvar::new()),
             counters: Arc::new(Counters::default()),
-            teardown: Arc::new(Mutex::new(())),
         }
     }
 
@@ -43,8 +51,16 @@ impl TunnelState {
     pub fn status(&self) -> Status {
         let g = self.lock();
         let phase = match g.phase {
-            Phase::Running if !self.counters.link_up.load(Ordering::Relaxed) => Phase::Degraded,
-            p => p,
+            InternalPhase::Stopped => Phase::Stopped,
+            InternalPhase::Starting => Phase::Starting,
+            InternalPhase::Stopping => Phase::Stopped,
+            InternalPhase::Running => {
+                if !self.counters.link_up.load(Ordering::Relaxed) {
+                    Phase::Degraded
+                } else {
+                    Phase::Running
+                }
+            }
         };
         Self::snapshot(&g, phase)
     }
@@ -58,109 +74,126 @@ impl TunnelState {
         }
     }
 
-    /// Seeds the endpoint (e.g. last used) while idle.
     pub fn preset_target(&self, target: Target) {
         let mut g = self.lock();
-        if g.phase == Phase::Stopped {
+        if g.phase == InternalPhase::Stopped {
             g.target = target;
         }
     }
 
-    /// Blocking (may show an authorization prompt); the state lock is not held while starting.
     pub fn start(&self, opts: StartOptions) -> Result<Status, TunnelError> {
         let StartOptions { target, auth, resolver } = opts;
         let IpAddr::V4(phone) = target.host else {
             return Err(TunnelError::Validation("only IPv4 proxy addresses are supported"));
         };
 
-        // Serialize starts and wait for any ongoing engine teardown to complete.
-        let _teardown = self.teardown.lock().unwrap_or_else(|p| p.into_inner());
-
+        // Transition to Starting; wait if currently Stopping
         {
             let mut g = self.lock();
-            if g.phase != Phase::Stopped {
-                return Err(TunnelError::Conflict("tunnel is already running"));
+            while g.phase == InternalPhase::Stopping {
+                g = self.phase_cv.wait(g).unwrap_or_else(|p| p.into_inner());
             }
-            g.phase = Phase::Starting;
-            g.cancel_start = false;
+            if g.phase != InternalPhase::Stopped {
+                return Err(TunnelError::Conflict("tunnel is already running or starting"));
+            }
+            g.phase = InternalPhase::Starting;
+            g.cancel_requested = false;
             g.target = target;
+            g.link = None;
         }
 
-        // Reset live counters for the new session
-        self.counters.rx_bytes.store(0, Ordering::Relaxed);
-        self.counters.tx_bytes.store(0, Ordering::Relaxed);
-        self.counters.rx_packets.store(0, Ordering::Relaxed);
-        self.counters.tx_packets.store(0, Ordering::Relaxed);
-        self.counters.dropped.store(0, Ordering::Relaxed);
-        self.counters.link_up.store(false, Ordering::Relaxed);
+        // Reset telemetry counters cleanly (including rtt and jitter)
+        self.counters.reset();
 
-        // Catch panics during Engine::start so phase does not get stuck in Starting
-        let started = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             Engine::start(phone, target.port, auth, resolver, self.counters.clone())
-        })) {
+        }));
+
+        let engine_result = match started {
             Ok(res) => res,
             Err(payload) => {
                 let mut g = self.lock();
-                g.phase = Phase::Stopped;
-                g.cancel_start = false;
+                g.phase = InternalPhase::Stopped;
+                g.cancel_requested = false;
+                g.link = None;
+                self.phase_cv.notify_all();
                 std::panic::resume_unwind(payload);
             }
         };
 
-        match started {
+        match engine_result {
             Ok(engine) => {
-                let to_stop = {
-                    let mut g = self.lock();
-                    if g.cancel_start || g.phase != Phase::Starting {
-                        g.phase = Phase::Stopped;
-                        g.cancel_start = false;
-                        Some(engine)
-                    } else {
-                        g.link = Some((engine.uplink().clone(), engine.udp_mode()));
-                        g.engine = Some(engine);
-                        g.phase = Phase::Running;
-                        None
-                    }
-                };
+                let mut g = self.lock();
+                if g.cancel_requested || g.phase != InternalPhase::Starting {
+                    g.phase = InternalPhase::Stopping;
+                    self.phase_cv.notify_all();
+                    drop(g);
 
-                if let Some(orphan) = to_stop {
-                    // Start was cancelled or stop was requested while Engine::start was running.
-                    // Shut down the orphan engine immediately outside the state lock.
-                    orphan.stop();
-                    let g = self.lock();
-                    return Ok(Self::snapshot(&g, Phase::Stopped));
+                    engine.stop();
+
+                    let mut g = self.lock();
+                    g.phase = InternalPhase::Stopped;
+                    g.cancel_requested = false;
+                    g.link = None;
+                    self.phase_cv.notify_all();
+                    return Err(TunnelError::Conflict("tunnel startup was cancelled"));
                 }
 
-                let g = self.lock();
-                Ok(Self::snapshot(&g, g.phase))
+                let link_info = (engine.uplink().clone(), engine.udp_mode());
+                g.link = Some(link_info);
+                g.engine = Some(engine);
+                g.phase = InternalPhase::Running;
+                self.phase_cv.notify_all();
+
+                let phase = if !self.counters.link_up.load(Ordering::Relaxed) {
+                    Phase::Degraded
+                } else {
+                    Phase::Running
+                };
+                Ok(Self::snapshot(&g, phase))
             }
             Err(e) => {
                 let mut g = self.lock();
-                g.phase = Phase::Stopped;
-                g.cancel_start = false;
+                g.phase = InternalPhase::Stopped;
+                g.cancel_requested = false;
+                g.link = None;
+                self.phase_cv.notify_all();
                 Err(TunnelError::from(e))
             }
         }
     }
 
-    /// Blocking: waits for the watchdog to remove the firewall rules.
     pub fn stop(&self) -> Status {
-        let engine = {
-            let mut g = self.lock();
-            if g.phase == Phase::Starting {
-                g.cancel_start = true;
-                g.phase = Phase::Stopped;
-                return Self::snapshot(&g, g.phase);
+        let mut g = self.lock();
+
+        if g.phase == InternalPhase::Starting {
+            g.cancel_requested = true;
+            while g.phase == InternalPhase::Starting {
+                g = self.phase_cv.wait(g).unwrap_or_else(|p| p.into_inner());
             }
-            g.phase = Phase::Stopped;
-            g.link = None;
-            g.engine.take()
-        };
+        }
+
+        while g.phase == InternalPhase::Stopping {
+            g = self.phase_cv.wait(g).unwrap_or_else(|p| p.into_inner());
+        }
+
+        if g.phase == InternalPhase::Stopped {
+            return Self::snapshot(&g, Phase::Stopped);
+        }
+
+        g.phase = InternalPhase::Stopping;
+        g.link = None;
+        let engine = g.engine.take();
+        drop(g);
+
         if let Some(engine) = engine {
-            let _teardown = self.teardown.lock().unwrap_or_else(|p| p.into_inner());
             engine.stop();
         }
-        self.status()
+
+        let mut g = self.lock();
+        g.phase = InternalPhase::Stopped;
+        self.phase_cv.notify_all();
+        Self::snapshot(&g, Phase::Stopped)
     }
 }
 

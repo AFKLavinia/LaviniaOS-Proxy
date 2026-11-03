@@ -5,6 +5,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use std::os::unix::io::AsRawFd;
+
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{watch, Semaphore};
@@ -15,7 +18,7 @@ use super::Counters;
 use crate::platform;
 
 const MAX_CONNECTIONS: usize = 2048;
-const RELAY_BUF: usize = 64 * 1024;
+const RELAY_BUF: usize = 16 * 1024;
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(100);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -28,6 +31,49 @@ fn apply_socket_opts(stream: &TcpStream, dst: &SocketAddr) {
         .with_time(Duration::from_secs(30))
         .with_interval(Duration::from_secs(10));
     let _ = socket.set_tcp_keepalive(&keepalive);
+    let _ = socket.set_nodelay(true);
+
+    #[cfg(target_os = "linux")]
+    {
+        let fd = stream.as_raw_fd();
+        // Enable TCP_QUICKACK to prevent 40ms delayed-ACK jitter in games like HoI4/War Thunder
+        unsafe {
+            let one: libc::c_int = 1;
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_QUICKACK,
+                &one as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&one) as libc::socklen_t,
+            );
+        }
+        // Anti-bufferbloat: limit un-sent queue in kernel socket buffer to 16KB.
+        // Fail-open: if unsupported by the kernel, ignore silently.
+        const TCP_NOTSENT_LOWAT: libc::c_int = 25;
+        let lowat: libc::c_uint = 16384;
+        unsafe {
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                TCP_NOTSENT_LOWAT,
+                &lowat as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&lowat) as libc::socklen_t,
+            );
+        }
+
+        // Try enabling BBR congestion control on the upstream/client socket if available.
+        // Fail-open: if TCP_CONGESTION bbr is not loaded or unsupported, kernel remains on default (e.g. cubic).
+        let bbr_name = b"bbr\0";
+        unsafe {
+            let _ = libc::setsockopt(
+                fd,
+                libc::IPPROTO_TCP,
+                libc::TCP_CONGESTION,
+                bbr_name.as_ptr() as *const libc::c_void,
+                (bbr_name.len() - 1) as libc::socklen_t,
+            );
+        }
+    }
 }
 
 pub async fn serve(
@@ -78,7 +124,7 @@ pub async fn serve(
     }
 }
 
-async fn relay(client: TcpStream, proxy: &Upstream, c: &Counters) -> io::Result<()> {
+async fn relay(mut client: TcpStream, proxy: &Upstream, c: &Counters) -> io::Result<()> {
     let dst = platform::original_dst(&client)?;
     if dst.ip().is_loopback()
         || dst.ip().is_unspecified()
@@ -88,54 +134,101 @@ async fn relay(client: TcpStream, proxy: &Upstream, c: &Counters) -> io::Result<
     {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "destination address refused"));
     }
-    let upstream = socks5::connect(proxy, SocketAddr::V4(dst)).await?;
+    let mut upstream = socks5::connect(proxy, SocketAddr::V4(dst)).await?;
     client.set_nodelay(true)?;
     upstream.set_nodelay(true)?;
     apply_socket_opts(&client, &SocketAddr::V4(dst));
     apply_socket_opts(&upstream, &SocketAddr::V4(dst));
 
-    let (mut cr, mut cw) = client.into_split();
-    let (mut ur, mut uw) = upstream.into_split();
+    let (mut cr, mut cw) = client.split();
+    let (mut ur, mut uw) = upstream.split();
 
-    let client_to_upstream = async {
+    let last_activity = Arc::new(std::sync::atomic::AtomicU64::new(
+        crate::engine::aqm_controller::monotonic_micros(std::time::Instant::now()),
+    ));
+
+    let act1 = Arc::clone(&last_activity);
+    let c1 = c;
+    let client_to_upstream = async move {
         let mut buf = vec![0u8; RELAY_BUF];
         loop {
             let n = cr.read(&mut buf).await?;
             if n == 0 {
-                uw.shutdown().await?;
+                let _ = uw.shutdown().await;
                 break;
             }
             uw.write_all(&buf[..n]).await?;
-            c.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-            c.tx_packets.fetch_add(1, Ordering::Relaxed);
+            act1.store(
+                crate::engine::aqm_controller::monotonic_micros(std::time::Instant::now()),
+                Ordering::Relaxed,
+            );
+            c1.tx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            c1.tx_packets.fetch_add(1, Ordering::Relaxed);
         }
         Ok::<(), io::Error>(())
     };
 
-    let upstream_to_client = async {
+    let act2 = Arc::clone(&last_activity);
+    let c2 = c;
+    let upstream_to_client = async move {
         let mut buf = vec![0u8; RELAY_BUF];
         loop {
             let n = ur.read(&mut buf).await?;
             if n == 0 {
-                cw.shutdown().await?;
+                let _ = cw.shutdown().await;
                 break;
             }
             cw.write_all(&buf[..n]).await?;
-            c.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
-            c.rx_packets.fetch_add(1, Ordering::Relaxed);
+            act2.store(
+                crate::engine::aqm_controller::monotonic_micros(std::time::Instant::now()),
+                Ordering::Relaxed,
+            );
+            c2.rx_bytes.fetch_add(n as u64, Ordering::Relaxed);
+            c2.rx_packets.fetch_add(1, Ordering::Relaxed);
         }
         Ok::<(), io::Error>(())
     };
 
-    tokio::select! {
-        res = async { tokio::try_join!(client_to_upstream, upstream_to_client) } => {
-            res?;
-        }
-        _ = tokio::time::sleep(IDLE_TIMEOUT) => {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "tcp relay idle timeout"));
+    let mut client_done = false;
+    let mut upstream_done = false;
+
+    tokio::pin!(client_to_upstream);
+    tokio::pin!(upstream_to_client);
+
+    let mut check_interval = tokio::time::interval(Duration::from_secs(15));
+    check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            res = &mut client_to_upstream, if !client_done => {
+                client_done = true;
+                if let Err(e) = res {
+                    report(&e);
+                    return Err(e);
+                }
+                if upstream_done {
+                    return Ok(());
+                }
+            }
+            res = &mut upstream_to_client, if !upstream_done => {
+                upstream_done = true;
+                if let Err(e) = res {
+                    report(&e);
+                    return Err(e);
+                }
+                if client_done {
+                    return Ok(());
+                }
+            }
+            _ = check_interval.tick() => {
+                let now_micros = crate::engine::aqm_controller::monotonic_micros(std::time::Instant::now());
+                let last = last_activity.load(Ordering::Relaxed);
+                if now_micros.saturating_sub(last) >= IDLE_TIMEOUT.as_micros() as u64 {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "tcp relay idle timeout"));
+                }
+            }
         }
     }
-    Ok(())
 }
 
 /// Peer resets/closes are normal relay termination; anything else is logged.

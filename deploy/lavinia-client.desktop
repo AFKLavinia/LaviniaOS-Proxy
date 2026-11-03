@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Lavinia Client
+Comment=Transparent Proxy & Debloat Client
+Exec=lavinia-client
+Icon=network-vpn
+Terminal=false
+Type=Application
+Categories=Network;Proxy;VPN;
+StartupNotify=true
+

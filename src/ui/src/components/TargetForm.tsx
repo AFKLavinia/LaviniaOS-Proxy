@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import type { Target } from "../ipc";
 import type { Translations } from "../lib/i18n";
 
@@ -8,9 +8,87 @@ interface Props {
   disabled: boolean;
   t: Translations;
   onChange: (next: { host: string; port: string }) => void;
+  onCredentialsDetected?: (user: string, pass: string) => void;
 }
 
-export function TargetForm({ host, port, disabled, t, onChange }: Props) {
+/**
+ * Robust endpoint parser handling URLs, scheme prefixes, Telegram proxy links,
+ * credentials extraction and port validation.
+ */
+export function parseEndpoint(input: string): { host: string; port?: string; user?: string; pass?: string } | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+
+  // Handle Telegram socks proxy links: tg://socks?server=1.2.3.4&port=1080&user=u&pass=p
+  if (trimmed.startsWith("tg://") || trimmed.startsWith("tg:socks")) {
+    try {
+      const url = new URL(trimmed.replace(/^tg:\/\/socks\?/, "https://dummy/?"));
+      const server = url.searchParams.get("server");
+      const port = url.searchParams.get("port");
+      const user = url.searchParams.get("user") ?? undefined;
+      const pass = url.searchParams.get("pass") ?? undefined;
+      if (server) {
+        return { host: server, port: port ?? "1080", user, pass };
+      }
+    } catch {
+      // Fallback to regex if URL parser fails
+    }
+  }
+
+  // Handle scheme prefixes (socks5://, http://, etc.)
+  let clean = trimmed.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+
+  // Extract credentials if present: user:pass@host:port
+  let user: string | undefined;
+  let pass: string | undefined;
+  const atIdx = clean.indexOf("@");
+  if (atIdx > 0) {
+    const creds = clean.slice(0, atIdx);
+    clean = clean.slice(atIdx + 1);
+    const colonIdx = creds.indexOf(":");
+    if (colonIdx >= 0) {
+      user = creds.slice(0, colonIdx);
+      pass = creds.slice(colonIdx + 1);
+    } else {
+      user = creds;
+    }
+  }
+
+  // Strip trailing path/slash
+  clean = clean.split("/")[0].split("?")[0].split("#")[0];
+
+  // IPv6 bracketed format: [2001:db8::1]:1080
+  const ipv6Match = clean.match(/^\[([0-9a-fA-F:]+)\](?::([0-9]+))?$/);
+  if (ipv6Match) {
+    return {
+      host: ipv6Match[1],
+      port: ipv6Match[2],
+      user,
+      pass,
+    };
+  }
+
+  // Host:port format
+  const lastColon = clean.lastIndexOf(":");
+  if (lastColon > 0) {
+    const h = clean.slice(0, lastColon);
+    const p = clean.slice(lastColon + 1);
+    if (/^\d+$/.test(p)) {
+      return { host: h, port: p, user, pass };
+    }
+  }
+
+  return { host: clean, user, pass };
+}
+
+export const TargetForm = memo(function TargetForm({
+  host,
+  port,
+  disabled,
+  t,
+  onChange,
+  onCredentialsDetected,
+}: Props) {
   const [savedList, setSavedList] = useState<string[]>(() => {
     try {
       const stored = localStorage.getItem("lavinia_saved_endpoints");
@@ -63,6 +141,19 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
     }
   };
 
+  const handleHostPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const text = e.clipboardData.getData("text");
+    const parsed = parseEndpoint(text);
+    if (parsed) {
+      e.preventDefault();
+      const nextPort = parsed.port ? String(Math.min(65535, Math.max(1, parseInt(parsed.port, 10)))) : port;
+      onChange({ host: parsed.host, port: nextPort });
+      if (parsed.user && parsed.pass && onCredentialsDetected) {
+        onCredentialsDetected(parsed.user, parsed.pass);
+      }
+    }
+  };
+
   return (
     <section className="card" aria-label={t.proxyEndpoint}>
       <div className="card-header-row">
@@ -89,7 +180,23 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
             inputMode="url"
             spellCheck={false}
             placeholder="192.168.43.1"
-            onChange={(e) => onChange({ host: e.target.value, port })}
+            onPaste={handleHostPaste}
+            onChange={(e) => {
+              const val = e.target.value;
+              // If user pastes/types a full URL or host:port into the host field
+              if (val.includes("://") || val.includes("tg:")) {
+                const parsed = parseEndpoint(val);
+                if (parsed) {
+                  const nextPort = parsed.port ? String(Math.min(65535, Math.max(1, parseInt(parsed.port, 10)))) : port;
+                  onChange({ host: parsed.host, port: nextPort });
+                  if (parsed.user && parsed.pass && onCredentialsDetected) {
+                    onCredentialsDetected(parsed.user, parsed.pass);
+                  }
+                  return;
+                }
+              }
+              onChange({ host: val, port });
+            }}
           />
         </label>
         <label className="field port">
@@ -120,23 +227,29 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
           <span className="quick-label">{t.savedEndpoints}:</span>
           <div className="quick-tags">
             {savedList.map((ep) => (
-              <button
-                type="button"
+              <div
                 key={ep}
-                className={`quick-tag ${ep === `${host.trim()}:${port.trim()}` ? "active" : ""}`}
-                onClick={() => handleSelect(ep)}
+                className={`quick-tag-wrap ${ep === `${host.trim()}:${port.trim()}` ? "active" : ""}`}
+                style={{ display: "inline-flex", alignItems: "center" }}
               >
-                {ep}
+                <button
+                  type="button"
+                  className="quick-tag"
+                  onClick={() => handleSelect(ep)}
+                >
+                  {ep}
+                </button>
                 <button
                   type="button"
                   className="quick-del-btn"
                   title={t.delete}
                   aria-label={`${t.delete} ${ep}`}
                   onClick={(e) => handleDelete(ep, e)}
+                  style={{ marginLeft: "-6px", zIndex: 2 }}
                 >
                   ×
                 </button>
-              </button>
+              </div>
             ))}
           </div>
         </div>
@@ -145,7 +258,7 @@ export function TargetForm({ host, port, disabled, t, onChange }: Props) {
       <p className="hint">{t.endpointHint}</p>
     </section>
   );
-}
+});
 
 export function toTarget(host: string, port: string): Target {
   const n = Number.parseInt(port.trim(), 10);

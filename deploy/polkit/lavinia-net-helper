@@ -1,0 +1,287 @@
+#!/bin/bash
+# Hardened privileged helper for LaviniaOS Proxy strictly enforcing bounded network operations.
+set -euo pipefail
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export LC_ALL=C
+export IFS=$' \t\n'
+umask 027
+
+ACTION="${1:-}"
+
+validate_ip() {
+    local ip="$1"
+    if [[ ! "$ip" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]]; then
+        echo "Invalid IP syntax: $ip" >&2; exit 2
+    fi
+    for octet in "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" "${BASH_REMATCH[4]}"; do
+        if (( octet > 255 )) || [[ "$octet" =~ ^0[0-9]+ ]]; then
+            echo "Invalid IP octet value: $ip" >&2; exit 2
+        fi
+    done
+}
+
+validate_port() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || { echo "Invalid port: $1" >&2; exit 2; }
+}
+
+validate_session_id() {
+    [[ "$1" =~ ^[a-zA-Z0-9_-]{8,64}$ ]] || { echo "Invalid session ID: $1" >&2; exit 2; }
+}
+
+validate_pid() {
+    [[ "$1" =~ ^[0-9]+$ ]] && [ "$1" -gt 0 ] || { echo "Invalid PID: $1" >&2; exit 2; }
+}
+
+validate_killswitch() {
+    case "$1" in
+        fail-open|fail-closed) ;;
+        *) echo "Invalid killswitch option: $1 (must be fail-open or fail-closed)" >&2; exit 2 ;;
+    esac
+}
+
+TABLE="lavinia"
+ROUTE_TABLE=4177
+FWMARK="0x4c41"
+PRIVATE_NETS="10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16"
+CGROUP_BYPASS_DIR="/sys/fs/cgroup/lavinia_bypass"
+
+case "$ACTION" in
+    apply-firewall)
+        PHONE="${2:-}"; TCP_PORT="${3:-}"; DNS_PORT="${4:-}"; UDP_PORT="${5:-0}"; SESSION_ID="${6:-}"; CLIENT_PID="${7:-}"; KILLSWITCH="${8:-fail-open}"
+        validate_ip "$PHONE"
+        validate_port "$TCP_PORT"
+        validate_port "$DNS_PORT"
+        [ "$UDP_PORT" != "0" ] && validate_port "$UDP_PORT"
+        validate_session_id "$SESSION_ID"
+        validate_pid "$CLIENT_PID"
+        validate_killswitch "$KILLSWITCH"
+
+        FLAG_DIR="/run/lavinia"
+        mkdir -p "$FLAG_DIR"
+        chmod 0755 "$FLAG_DIR"
+        FLAG_FILE="${FLAG_DIR}/session_${SESSION_ID}.run"
+        touch "$FLAG_FILE"
+
+        # Cgroups v2 split-tunneling setup
+        CGROUP_RULES=""
+        CGROUP_ACCEPT=""
+        if [ -d "/sys/fs/cgroup" ] && [ -f "/sys/fs/cgroup/cgroup.controllers" ]; then
+            mkdir -p "$CGROUP_BYPASS_DIR"
+            CLIENT_UID="$(stat -c '%u' "/proc/${CLIENT_PID}" 2>/dev/null || echo "")"
+            if [ -n "$CLIENT_UID" ]; then
+                chown -R "$CLIENT_UID" "$CGROUP_BYPASS_DIR" 2>/dev/null || true
+            fi
+            chmod 0755 "$CGROUP_BYPASS_DIR" 2>/dev/null || true
+            CGROUP_RULES="socket cgroupv2 level 1 \"lavinia_bypass\" return"
+            CGROUP_ACCEPT="socket cgroupv2 level 1 \"lavinia_bypass\" accept"
+        fi
+
+        if [ "$UDP_PORT" != "0" ]; then
+            while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
+            ip rule add fwmark "$FWMARK" lookup "$ROUTE_TABLE"
+            ip route replace local 0.0.0.0/0 dev lo table "$ROUTE_TABLE"
+        fi
+
+        UDP_RULES=""
+        if [ "$UDP_PORT" != "0" ]; then
+            UDP_RULES="
+            chain mark_out {
+                type route hook output priority -150; policy accept;
+                ${CGROUP_RULES}
+                socket transparent 1 return
+                fib daddr type { local, broadcast, multicast } return
+                ip daddr 127.0.0.0/8 return
+                ip daddr 255.255.255.255 return
+                udp dport 53 return
+                ip daddr ${PHONE} return
+                ip daddr { ${PRIVATE_NETS} } return
+                meta l4proto udp meta mark set ${FWMARK}
+            }
+            chain tproxy_in {
+                type filter hook prerouting priority -150; policy accept;
+                meta mark ${FWMARK} meta l4proto udp tproxy to :${UDP_PORT}
+            }
+            "
+        fi
+
+        nft -f - <<EOF
+table ip ${TABLE}
+delete table ip ${TABLE}
+table ip ${TABLE} {
+    chain nat_out {
+        type nat hook output priority -100; policy accept;
+        ${CGROUP_RULES}
+        udp dport 53 ip daddr != 127.0.0.1 redirect to :${DNS_PORT}
+        tcp dport 53 ip daddr != 127.0.0.1 redirect to :${TCP_PORT}
+        ip daddr 127.0.0.0/8 return
+        ip daddr ${PHONE} return
+        ip daddr { ${PRIVATE_NETS} } return
+        meta l4proto tcp redirect to :${TCP_PORT}
+    }
+    chain mss_clamp {
+        type filter hook output priority -140; policy accept;
+        oifname "lo" return
+        fib daddr type { local, broadcast, multicast } return
+        ${CGROUP_RULES}
+        ip daddr 127.0.0.0/8 return
+        ip daddr ${PHONE} return
+        ip daddr { ${PRIVATE_NETS} } return
+        tcp flags syn tcp option maxseg size set rt mtu
+    }
+    ${UDP_RULES}
+    chain filter_out {
+        type filter hook output priority 0; policy accept;
+        oifname "lo" accept
+        fib daddr type { local, broadcast, multicast } accept
+        ${CGROUP_ACCEPT}
+        ip daddr 127.0.0.0/8 accept
+        udp sport 68 udp dport 67 accept
+        ip daddr ${PHONE} accept
+        ip daddr { ${PRIVATE_NETS} } accept
+        $([ "$UDP_PORT" != "0" ] && echo "meta mark ${FWMARK} accept")
+        meta l4proto udp reject
+    }
+}
+
+table ip6 ${TABLE}
+delete table ip6 ${TABLE}
+table ip6 ${TABLE} {
+    chain filter_out {
+        type filter hook output priority 0; policy accept;
+        oifname "lo" accept
+        ${CGROUP_ACCEPT}
+        udp dport 53 reject
+        tcp dport 53 reject
+        ip6 daddr { fe80::/10, ff02::/16 } accept
+        meta l4proto ipv6-icmp accept
+        reject
+    }
+}
+EOF
+
+        # Watchdog: Safe positional parameters prevent shell injection.
+        # Uses 0.5s sleep to eliminate tight spin loops while keeping responsive crash cleanup.
+        setsid /bin/bash -c '
+            FLAG_FILE="$1"
+            CLIENT_PID="$2"
+            TABLE="$3"
+            FWMARK="$4"
+            ROUTE_TABLE="$5"
+            FAIL_CLOSED="$6"
+
+            cleanup_rules() {
+                nft delete table ip "$TABLE" 2>/dev/null || true
+                nft delete table ip6 "$TABLE" 2>/dev/null || true
+                while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
+                ip route flush table "$ROUTE_TABLE" 2>/dev/null || true
+                rm -f "$FLAG_FILE"
+            }
+
+            arm_killswitch() {
+                nft -f - << "EOF"
+table inet lavinia_killswitch
+delete table inet lavinia_killswitch
+table inet lavinia_killswitch {
+    chain output {
+        type filter hook output priority -10; policy drop;
+        oifname "lo" accept
+        fib daddr type { local, broadcast, multicast } accept
+        ip daddr 127.0.0.0/8 accept
+        ip6 daddr ::1 accept
+        ip daddr { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept
+    }
+}
+EOF
+            }
+
+            while [ -f "$FLAG_FILE" ] && kill -0 "$CLIENT_PID" 2>/dev/null; do
+                sleep 0.5
+            done
+
+            # Graceful cleanup removed the flag file: do not arm killswitch
+            if [ ! -f "$FLAG_FILE" ]; then
+                cleanup_rules
+                exit 0
+            fi
+
+            # Abnormal termination: clean redirect tables and arm killswitch if configured
+            cleanup_rules
+            if [ "$FAIL_CLOSED" = "fail-closed" ]; then
+                arm_killswitch
+            fi
+            exit 0
+        ' _ "$FLAG_FILE" "$CLIENT_PID" "$TABLE" "$FWMARK" "$ROUTE_TABLE" "$KILLSWITCH" >/dev/null 2>&1 < /dev/null &
+        ;;
+
+    cleanup-firewall)
+        SESSION_ID="${2:-}"
+        if [ -n "$SESSION_ID" ]; then
+            validate_session_id "$SESSION_ID"
+            rm -f "/run/lavinia/session_${SESSION_ID}.run"
+        fi
+        nft delete table ip "$TABLE" 2>/dev/null || true
+        nft delete table ip6 "$TABLE" 2>/dev/null || true
+        while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
+        ip route flush table "$ROUTE_TABLE" 2>/dev/null || true
+
+        # Clean up cgroup v2 bypass directory if empty
+        if [ -d "$CGROUP_BYPASS_DIR" ]; then
+            if [ -f "$CGROUP_BYPASS_DIR/cgroup.procs" ]; then
+                while read -r p; do
+                    echo "$p" > /sys/fs/cgroup/cgroup.procs 2>/dev/null || true
+                done < "$CGROUP_BYPASS_DIR/cgroup.procs" 2>/dev/null || true
+            fi
+            rmdir "$CGROUP_BYPASS_DIR" 2>/dev/null || true
+        fi
+        ;;
+
+    killswitch-on)
+        nft -f - <<'EOF'
+table inet lavinia_killswitch
+delete table inet lavinia_killswitch
+table inet lavinia_killswitch {
+    chain output {
+        type filter hook output priority -10; policy drop;
+        oifname "lo" accept
+        fib daddr type { local, broadcast, multicast } accept
+        ip daddr 127.0.0.0/8 accept
+        ip6 daddr ::1 accept
+        ip daddr { 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 } accept
+    }
+}
+EOF
+        ;;
+
+    killswitch-off)
+        nft delete table inet lavinia_killswitch 2>/dev/null || true
+        ;;
+
+    grant-capabilities)
+        TARGET_BIN="${2:-}"
+        [ -n "$TARGET_BIN" ] || { echo "Missing target binary" >&2; exit 2; }
+        REAL_PATH="$(realpath -e "$TARGET_BIN" 2>/dev/null || true)"
+        [ -n "$REAL_PATH" ] || { echo "Target binary does not exist: $TARGET_BIN" >&2; exit 2; }
+
+        if [ "$REAL_PATH" = "/usr/bin/lavinia-client" ] || [ "$REAL_PATH" = "/usr/local/bin/lavinia-client" ]; then
+            OWNER="$(stat -c '%u' "$REAL_PATH" 2>/dev/null || echo -1)"
+            PERMS="$(stat -c '%a' "$REAL_PATH" 2>/dev/null || echo 777)"
+            if [ "$OWNER" -ne 0 ]; then
+                echo "Access denied: $REAL_PATH must be owned by root" >&2
+                exit 3
+            fi
+            if [ $(( 0$PERMS & 0022 )) -ne 0 ]; then
+                echo "Access denied: $REAL_PATH cannot be group- or world-writable" >&2
+                exit 3
+            fi
+            setcap cap_net_admin+ep "$REAL_PATH"
+        else
+            echo "Access denied: target path not permitted: $REAL_PATH" >&2
+            exit 3
+        fi
+        ;;
+
+    *)
+        echo "Usage: $0 {apply-firewall|cleanup-firewall|killswitch-on|killswitch-off|grant-capabilities}" >&2
+        exit 1
+        ;;
+esac

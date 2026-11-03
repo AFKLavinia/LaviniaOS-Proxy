@@ -39,7 +39,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             {
                 let app = tray.app_handle();
                 if let Some(win) = app.get_webview_window(window::MAIN_LABEL) {
-                    if win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false) {
+                    if win.is_visible().unwrap_or(false) {
                         let _ = win.hide();
                         return;
                     }
