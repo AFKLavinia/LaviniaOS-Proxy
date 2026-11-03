@@ -61,6 +61,17 @@ pub async fn grant_udp_privilege(
 }
 
 #[tauri::command]
+pub fn get_adblock() -> bool {
+    crate::engine::adblock_enabled()
+}
+
+#[tauri::command]
+pub fn set_adblock(enabled: bool) -> bool {
+    crate::engine::set_adblock_enabled(enabled);
+    crate::engine::adblock_enabled()
+}
+
+#[tauri::command]
 pub async fn get_autostart() -> bool {
     tauri::async_runtime::spawn_blocking(crate::platform::autostart_enabled)
         .await

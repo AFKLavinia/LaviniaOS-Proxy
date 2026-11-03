@@ -51,13 +51,13 @@ export function Stats({ latest, rxHistory, txHistory, t }: Props) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
             <span className="stat-label">⚡ Ping (RTT)</span>
-            <strong className="stat-value small" style={{ color: latest.rttMs > 0 && latest.rttMs < 60 ? "#4ade80" : latest.rttMs >= 60 && latest.rttMs < 120 ? "#facc15" : undefined }}>
+            <strong className="stat-value small" style={{ color: latest.rttMs <= 0 ? undefined : latest.rttMs < 60 ? "#4ade80" : latest.rttMs < 120 ? "#facc15" : "#f87171" }}>
               {latest.rttMs > 0 ? `${latest.rttMs} ms` : "—"}
             </strong>
           </div>
           <div>
             <span className="stat-label">Jitter</span>
-            <strong className="stat-value small">
+            <strong className="stat-value small" style={{ color: latest.jitterMs <= 0 ? undefined : latest.jitterMs < 15 ? "#4ade80" : latest.jitterMs < 40 ? "#facc15" : "#f87171" }}>
               {latest.jitterMs > 0 ? `${latest.jitterMs} ms` : "—"}
             </strong>
           </div>

@@ -19,6 +19,34 @@ const autostartIpc = ipc as typeof ipc & {
 export function SettingsModal({ t, lang, theme, onLangChange, onThemeChange, onClose }: Props) {
   const [autostart, setAutostart] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
+  const [adblock, setAdblock] = useState(true);
+  const [adblockBusy, setAdblockBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    ipc
+      .getAdblock()
+      .then((enabled) => {
+        if (active) setAdblock(Boolean(enabled));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleToggleAdblock = async () => {
+    const next = !adblock;
+    setAdblock(next);
+    setAdblockBusy(true);
+    try {
+      setAdblock(Boolean(await ipc.setAdblock(next)));
+    } catch {
+      setAdblock(!next);
+    } finally {
+      setAdblockBusy(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -183,6 +211,25 @@ export function SettingsModal({ t, lang, theme, onLangChange, onThemeChange, onC
                 className={`toggle-switch ${autostart ? "active" : ""}`}
                 disabled={autostartBusy}
                 onClick={handleToggleAutostart}
+              >
+                <span className="toggle-slider" />
+              </button>
+            </div>
+          </div>
+          <div className="settings-group">
+            <div className="settings-toggle-row">
+              <span id="adblock-label" className="settings-label">
+                {lang === "tr" ? "Reklam ve İzleyici Engelleme (DNS)" : "Ad & Tracker Blocking (DNS)"}
+              </span>
+              <button
+                id="adblock-toggle"
+                type="button"
+                role="switch"
+                aria-checked={adblock}
+                aria-labelledby="adblock-label"
+                className={`toggle-switch ${adblock ? "active" : ""}`}
+                disabled={adblockBusy}
+                onClick={handleToggleAdblock}
               >
                 <span className="toggle-slider" />
               </button>

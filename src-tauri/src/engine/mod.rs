@@ -20,7 +20,7 @@ use tokio::runtime::{Builder, Runtime};
 use tokio::sync::watch;
 
 pub use counters::Counters;
-pub use dns::DEFAULT_RESOLVER;
+pub use dns::{adblock_enabled, set_adblock_enabled, DEFAULT_RESOLVER};
 pub use socks5::Auth;
 
 use socks5::Upstream;

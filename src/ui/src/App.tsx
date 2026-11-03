@@ -16,7 +16,27 @@ function push(list: number[], v: number): number[] {
   return [...list, v].slice(-HISTORY);
 }
 
+const FRIENDLY_ERRORS: Array<[RegExp, string]> = [
+  [/authorization was cancelled or denied/i, "Yetkilendirme iptal edildi veya reddedildi."],
+  [/connection refused/i, "Telefondaki proxy bağlantıyı reddetti. Uygulamanın açık olduğundan emin olun."],
+  [/(timed out|timeout)/i, "Telefona ulaşılamadı (zaman aşımı). IP ve portu kontrol edin."],
+  [/(network is unreachable|no route to host)/i, "Telefona ağ yolu yok. Wi-Fi veya USB bağlantısını kontrol edin."],
+  [/auth/i, "Proxy kimlik doğrulaması başarısız. Kullanıcı adı ve şifreyi kontrol edin."],
+  [/firewall setup failed/i, "Güvenlik duvarı kuralları uygulanamadı. Yönetici yetkisi gerekiyor."],
+];
+
+function friendlyError(raw: string): string {
+  for (const [re, msg] of FRIENDLY_ERRORS) {
+    if (re.test(raw)) return msg;
+  }
+  return raw;
+}
+
 function formatError(e: unknown): string {
+  return friendlyError(rawError(e));
+}
+
+function rawError(e: unknown): string {
   if (typeof e === "string") {
     return e;
   }

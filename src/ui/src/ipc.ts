@@ -48,6 +48,8 @@ export const ipc = {
   stopTunnel: (): Promise<Status> => invoke<Status>("stop_tunnel"),
   getAutostart: (): Promise<boolean> => invoke<boolean>("get_autostart"),
   setAutostart: (enabled: boolean): Promise<boolean> => invoke<boolean>("set_autostart", { enabled }),
+  getAdblock: (): Promise<boolean> => invoke<boolean>("get_adblock"),
+  setAdblock: (enabled: boolean): Promise<boolean> => invoke<boolean>("set_adblock", { enabled }),
   onTelemetry: (cb: (t: Telemetry) => void): Promise<UnlistenFn> =>
     listen<Telemetry>("telemetry", (e) => cb(e.payload)),
 };

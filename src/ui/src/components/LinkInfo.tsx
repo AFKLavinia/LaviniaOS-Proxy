@@ -72,7 +72,21 @@ export function LinkInfo({ status, target, t, onFixUdp }: Props) {
       </div>
       <dl className="link-grid">
         <div><dt>{t.interface}</dt><dd>{link.device}</dd></div>
-        <div><dt>{t.proxy}</dt><dd>{target.host}:{target.port}</dd></div>
+        <div>
+          <dt>{t.proxy}</dt>
+          <dd>
+            {target.host}:{target.port}{" "}
+            <button
+              type="button"
+              className="card-action-btn"
+              title="Kopyala / Copy"
+              aria-label="Copy proxy address"
+              onClick={() => navigator.clipboard?.writeText(`${target.host}:${target.port}`).catch(() => {})}
+            >
+              ⧉
+            </button>
+          </dd>
+        </div>
         {link.hardware && link.name && <div><dt>{t.connection}</dt><dd>{link.name}</dd></div>}
         {chip && <div><dt>{t.udp}</dt><dd>{chip.hint}</dd></div>}
       </dl>

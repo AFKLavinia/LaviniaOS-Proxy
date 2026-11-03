@@ -20,7 +20,9 @@ pub fn run() {
             tunnel::commands::stop_tunnel,
             tunnel::commands::grant_udp_privilege,
             tunnel::commands::get_autostart,
-            tunnel::commands::set_autostart
+            tunnel::commands::set_autostart,
+            tunnel::commands::get_adblock,
+            tunnel::commands::set_adblock
         ])
         .setup(|app| {
             tray::install(app.handle())?;

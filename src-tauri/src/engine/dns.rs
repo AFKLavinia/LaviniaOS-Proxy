@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -177,8 +177,19 @@ fn build_blocked_response(query: &[u8]) -> Vec<u8> {
     resp
 }
 
+/// Runtime switch for the local ad/tracker sinkhole (on by default).
+static ADBLOCK_ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn adblock_enabled() -> bool {
+    ADBLOCK_ENABLED.load(Ordering::Relaxed)
+}
+
+pub fn set_adblock_enabled(enabled: bool) {
+    ADBLOCK_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 async fn resolve(query: &[u8], proxy: &Upstream, resolver: Ipv4Addr) -> io::Result<Vec<u8>> {
-    if is_ad_or_tracker(query) {
+    if adblock_enabled() && is_ad_or_tracker(query) {
         return Ok(build_blocked_response(query));
     }
     match timeout(QUERY_TIMEOUT, exchange(query, proxy, resolver)).await {
