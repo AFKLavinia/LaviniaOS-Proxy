@@ -122,6 +122,20 @@ async fn session(
         ([0u8; 4], 0).into()
     };
     let upstream = UdpSocket::bind(bind_addr).await?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let mark: libc::c_uint = socks5::BYPASS_MARK;
+        unsafe {
+            let _ = libc::setsockopt(
+                upstream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &mark as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&mark) as libc::socklen_t,
+            );
+        }
+    }
     upstream.connect(relay).await?;
     let reply = UdpSocket::from_std(platform::udp_spoof_socket(dst)?)?;
 

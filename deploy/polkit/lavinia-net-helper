@@ -42,8 +42,23 @@ validate_killswitch() {
 TABLE="lavinia"
 ROUTE_TABLE=4177
 FWMARK="0x4c41"
+VETH_IF="lavinia0"
+VETH_PEER="lavinia0-gw"
+VETH_ROUTING_TABLE="4178"
+BYPASS_FWMARK="0x4c42"
 PRIVATE_NETS="10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16"
 CGROUP_BYPASS_DIR="/sys/fs/cgroup/lavinia_bypass"
+
+teardown_veth_and_routes() {
+    while ip rule del priority 50 2>/dev/null; do :; done
+    while ip rule del priority 55 2>/dev/null; do :; done
+    while ip rule del priority 60 2>/dev/null; do :; done
+    while ip rule del priority 100 2>/dev/null; do :; done
+    ip route flush table "$VETH_ROUTING_TABLE" 2>/dev/null || true
+    ip link del "$VETH_IF" 2>/dev/null || true
+    while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
+    ip route flush table "$ROUTE_TABLE" 2>/dev/null || true
+}
 
 case "$ACTION" in
     apply-firewall)
@@ -62,6 +77,29 @@ case "$ACTION" in
         FLAG_FILE="${FLAG_DIR}/session_${SESSION_ID}.run"
         touch "$FLAG_FILE"
 
+        # Clean any stale virtual interface and routing rules before applying
+        teardown_veth_and_routes
+
+        # 1. Create dedicated Virtual Ethernet (veth) pair lavinia0 <-> lavinia0-gw
+        ip link add "$VETH_IF" type veth peer name "$VETH_PEER"
+        ip addr add 10.200.0.1/30 dev "$VETH_IF"
+        ip addr add 10.200.0.2/30 dev "$VETH_PEER"
+        ip link set "$VETH_IF" mtu 1420 up
+        ip link set "$VETH_PEER" mtu 1420 up
+        sysctl -w net.ipv4.conf."$VETH_IF".rp_filter=0 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.conf."$VETH_PEER".rp_filter=0 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
+        sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+        # 2. Policy routing table 4178: route full system traffic via lavinia0 while bypassing upstream & LAN
+        ip rule add to "$PHONE" lookup main priority 50
+        ip rule add fwmark "$BYPASS_FWMARK" lookup main priority 55
+        for cidr in 127.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4; do
+            ip rule add to "$cidr" lookup main priority 60
+        done
+        ip route replace default via 10.200.0.2 dev "$VETH_IF" table "$VETH_ROUTING_TABLE"
+        ip rule add lookup "$VETH_ROUTING_TABLE" priority 100
+
         # Cgroups v2 split-tunneling setup
         CGROUP_RULES=""
         CGROUP_ACCEPT=""
@@ -77,8 +115,7 @@ case "$ACTION" in
         fi
 
         if [ "$UDP_PORT" != "0" ]; then
-            while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
-            ip rule add fwmark "$FWMARK" lookup "$ROUTE_TABLE"
+            ip rule add fwmark "$FWMARK" lookup "$ROUTE_TABLE" priority 45
             ip route replace local 0.0.0.0/0 dev lo table "$ROUTE_TABLE"
         fi
 
@@ -88,6 +125,7 @@ case "$ACTION" in
             chain mark_out {
                 type route hook output priority -150; policy accept;
                 ${CGROUP_RULES}
+                meta mark ${BYPASS_FWMARK} return
                 socket transparent 1 return
                 fib daddr type { local, broadcast, multicast } return
                 ip daddr 127.0.0.0/8 return
@@ -95,11 +133,13 @@ case "$ACTION" in
                 udp dport 53 return
                 ip daddr ${PHONE} return
                 ip daddr { ${PRIVATE_NETS} } return
+                oifname \"${VETH_IF}\" meta l4proto udp meta mark set ${FWMARK}
                 meta l4proto udp meta mark set ${FWMARK}
             }
             chain tproxy_in {
                 type filter hook prerouting priority -150; policy accept;
-                meta mark ${FWMARK} meta l4proto udp tproxy to :${UDP_PORT}
+                iifname \"${VETH_PEER}\" udp dport != 53 meta mark set ${FWMARK} tproxy to 127.0.0.1:${UDP_PORT} accept
+                meta mark ${FWMARK} meta l4proto udp tproxy to 127.0.0.1:${UDP_PORT}
             }
             "
         fi
@@ -108,14 +148,22 @@ case "$ACTION" in
 table ip ${TABLE}
 delete table ip ${TABLE}
 table ip ${TABLE} {
+    chain nat_pre {
+        type nat hook prerouting priority -100; policy accept;
+        iifname "${VETH_PEER}" udp dport 53 redirect to :${DNS_PORT}
+        iifname "${VETH_PEER}" tcp dport 53 redirect to :${TCP_PORT}
+        iifname "${VETH_PEER}" ip daddr != { 127.0.0.0/8, ${PHONE}, ${PRIVATE_NETS} } meta l4proto tcp redirect to :${TCP_PORT}
+    }
     chain nat_out {
         type nat hook output priority -100; policy accept;
         ${CGROUP_RULES}
+        meta mark ${BYPASS_FWMARK} return
         udp dport 53 ip daddr != 127.0.0.1 redirect to :${DNS_PORT}
         tcp dport 53 ip daddr != 127.0.0.1 redirect to :${TCP_PORT}
         ip daddr 127.0.0.0/8 return
         ip daddr ${PHONE} return
         ip daddr { ${PRIVATE_NETS} } return
+        oifname "${VETH_IF}" meta l4proto tcp redirect to :${TCP_PORT}
         meta l4proto tcp redirect to :${TCP_PORT}
     }
     chain mss_clamp {
@@ -123,17 +171,21 @@ table ip ${TABLE} {
         oifname "lo" return
         fib daddr type { local, broadcast, multicast } return
         ${CGROUP_RULES}
+        meta mark ${BYPASS_FWMARK} return
         ip daddr 127.0.0.0/8 return
         ip daddr ${PHONE} return
         ip daddr { ${PRIVATE_NETS} } return
+        oifname "${VETH_IF}" tcp flags syn tcp option maxseg size set 1380
         tcp flags syn tcp option maxseg size set rt mtu
     }
     ${UDP_RULES}
     chain filter_out {
         type filter hook output priority 0; policy accept;
         oifname "lo" accept
+        oifname "${VETH_IF}" accept
         fib daddr type { local, broadcast, multicast } accept
         ${CGROUP_ACCEPT}
+        meta mark ${BYPASS_FWMARK} accept
         ip daddr 127.0.0.0/8 accept
         udp sport 68 udp dport 67 accept
         ip daddr ${PHONE} accept
@@ -168,10 +220,18 @@ EOF
             FWMARK="$4"
             ROUTE_TABLE="$5"
             FAIL_CLOSED="$6"
+            VETH_IF="$7"
+            VETH_ROUTING_TABLE="$8"
 
             cleanup_rules() {
                 nft delete table ip "$TABLE" 2>/dev/null || true
                 nft delete table ip6 "$TABLE" 2>/dev/null || true
+                while ip rule del priority 50 2>/dev/null; do :; done
+                while ip rule del priority 55 2>/dev/null; do :; done
+                while ip rule del priority 60 2>/dev/null; do :; done
+                while ip rule del priority 100 2>/dev/null; do :; done
+                ip route flush table "$VETH_ROUTING_TABLE" 2>/dev/null || true
+                ip link del "$VETH_IF" 2>/dev/null || true
                 while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
                 ip route flush table "$ROUTE_TABLE" 2>/dev/null || true
                 rm -f "$FLAG_FILE"
@@ -210,7 +270,7 @@ EOF
                 arm_killswitch
             fi
             exit 0
-        ' _ "$FLAG_FILE" "$CLIENT_PID" "$TABLE" "$FWMARK" "$ROUTE_TABLE" "$KILLSWITCH" >/dev/null 2>&1 < /dev/null &
+        ' _ "$FLAG_FILE" "$CLIENT_PID" "$TABLE" "$FWMARK" "$ROUTE_TABLE" "$KILLSWITCH" "$VETH_IF" "$VETH_ROUTING_TABLE" >/dev/null 2>&1 < /dev/null &
         ;;
 
     cleanup-firewall)
@@ -221,8 +281,7 @@ EOF
         fi
         nft delete table ip "$TABLE" 2>/dev/null || true
         nft delete table ip6 "$TABLE" 2>/dev/null || true
-        while ip rule del fwmark "$FWMARK" lookup "$ROUTE_TABLE" 2>/dev/null; do :; done
-        ip route flush table "$ROUTE_TABLE" 2>/dev/null || true
+        teardown_veth_and_routes
 
         # Clean up cgroup v2 bypass directory if empty
         if [ -d "$CGROUP_BYPASS_DIR" ]; then

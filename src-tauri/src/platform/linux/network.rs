@@ -6,18 +6,32 @@ use super::proc::run;
 use crate::platform::{LinkKind, PlatformError, Uplink};
 
 pub fn check_uplink(phone: Ipv4Addr) -> Result<Uplink, PlatformError> {
-    let route = run("ip", &["-4", "route", "get", &phone.to_string()])?;
+    let route = run("ip", &["-4", "route", "get", &phone.to_string(), "table", "main"])
+        .or_else(|_| run("ip", &["-4", "route", "get", &phone.to_string()]))?;
     let tokens: Vec<&str> = route.split_whitespace().collect();
     if tokens.first() == Some(&"local") {
         return Err(PlatformError::Unreachable("proxy address belongs to this machine".into()));
     }
     let device = tokens
         .windows(2)
-        .find(|w| w[0] == "dev")
+        .find(|w| w[0] == "dev" && !w[1].starts_with("lavinia"))
         .map(|w| w[1].to_string())
+        .or_else(|| {
+            // If `ip route get` returned `lavinia0` due to active policy routing, inspect main table default/subnet routes
+            let main_routes = run("ip", &["-4", "route", "show", "table", "main"]).ok()?;
+            for line in main_routes.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if let Some(dev) = parts.windows(2).find(|w| w[0] == "dev").map(|w| w[1]) {
+                    if dev != "lo" && !dev.starts_with("lavinia") {
+                        return Some(dev.to_string());
+                    }
+                }
+            }
+            None
+        })
         .ok_or_else(|| PlatformError::Unreachable(format!("no route to {phone}")))?;
-    if device == "lo" {
-        return Err(PlatformError::Unreachable(format!("{phone} resolves to loopback")));
+    if device == "lo" || device.starts_with("lavinia") {
+        return Err(PlatformError::Unreachable(format!("{phone} resolves to loopback or virtual tunnel")));
     }
 
     if let Ok(listing) = run("nmcli", &["-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device"]) {

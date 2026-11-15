@@ -100,6 +100,34 @@ async fn with_timeout<T>(limit: Duration, what: &'static str, f: impl std::futur
     }
 }
 
+pub const BYPASS_MARK: u32 = 0x4c42;
+
+/// Connects a TCP stream to the upstream proxy with best-effort `SO_MARK = 0x4c42` on Linux
+/// so upstream packets bypass the `lavinia0` virtual interface policy routing table (`4178`).
+async fn connect_upstream_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
+    let socket = match addr {
+        SocketAddr::V4(_) => tokio::net::TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => tokio::net::TcpSocket::new_v6()?,
+    };
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let mark: libc::c_uint = BYPASS_MARK;
+        unsafe {
+            let _ = libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_MARK,
+                &mark as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&mark) as libc::socklen_t,
+            );
+        }
+    }
+    let s = socket.connect(addr).await?;
+    s.set_nodelay(true)?;
+    Ok(s)
+}
+
 pub async fn connect(proxy: &Upstream, dst: SocketAddr) -> io::Result<TcpStream> {
     with_timeout(HANDSHAKE_TIMEOUT, "socks5 handshake timed out", handshake(proxy, dst)).await
 }
@@ -108,8 +136,7 @@ pub async fn connect(proxy: &Upstream, dst: SocketAddr) -> io::Result<TcpStream>
 pub async fn probe(proxy: &Upstream) -> io::Result<Duration> {
     let negotiate = async {
         let start = std::time::Instant::now();
-        let mut s = TcpStream::connect(proxy.addr).await?;
-        s.set_nodelay(true)?;
+        let mut s = connect_upstream_tcp(proxy.addr).await?;
         negotiate(&mut s, proxy).await?;
         Ok(start.elapsed())
     };
@@ -117,8 +144,7 @@ pub async fn probe(proxy: &Upstream) -> io::Result<Duration> {
 }
 
 async fn handshake(proxy: &Upstream, dst: SocketAddr) -> io::Result<TcpStream> {
-    let mut s = TcpStream::connect(proxy.addr).await?;
-    s.set_nodelay(true)?;
+    let mut s = connect_upstream_tcp(proxy.addr).await?;
     negotiate(&mut s, proxy).await?;
 
     let mut req = Vec::with_capacity(22);
@@ -195,8 +221,7 @@ pub async fn udp_associate(proxy: &Upstream) -> io::Result<(TcpStream, SocketAdd
 }
 
 async fn associate(proxy: &Upstream) -> io::Result<(TcpStream, SocketAddr)> {
-    let mut s = TcpStream::connect(proxy.addr).await?;
-    s.set_nodelay(true)?;
+    let mut s = connect_upstream_tcp(proxy.addr).await?;
     negotiate(&mut s, proxy).await?;
     // Zero address/port: our outgoing UDP source is not known in advance.
     s.write_all(&[VER, CMD_UDP_ASSOCIATE, 0, ATYP_V4, 0, 0, 0, 0, 0, 0]).await?;
